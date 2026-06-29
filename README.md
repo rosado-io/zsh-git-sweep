@@ -85,7 +85,7 @@ When everything is already clean:
 2. Identifies local branches whose upstream is marked `[gone]`.
 3. For each orphaned branch, finds any associated Git worktree.
 4. Forcefully removes the worktree first (`git worktree remove -f`).
-5. Deletes the local branch (`git branch -D`).
+5. Deletes the local branch (`git branch -d`).
 6. Runs `git worktree prune` for general cleanup.
 
 ## Contributing

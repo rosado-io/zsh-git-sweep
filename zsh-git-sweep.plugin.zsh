@@ -18,14 +18,14 @@ function gitsweep() {
   fi
 
   # 2. Identify local branches whose upstream is marked as [gone].
-  local line branch track
+  local branch track
   local -a gone_branches
 
-  while IFS= read -r line; do
-    branch=${line%% *}
-    track=${line#* }
-    [[ "$track" == *gone* ]] && gone_branches+=("$branch")
-  done < <(git for-each-ref --format='%(refname:short) %(upstream:track)' refs/heads)
+  while IFS=$'\t' read -r branch track; do
+    if [[ "$track" == "[gone]" ]]; then
+      gone_branches+=("$branch")
+    fi
+  done < <(git for-each-ref --format='%(refname:short)%09%(upstream:track)' refs/heads)
 
   # 8. Edge case: nothing to clean.
   if (( ${#gone_branches} == 0 )); then
@@ -42,7 +42,10 @@ function gitsweep() {
 
     # 4. Check if the branch has an active Git worktree.
     worktree_path=$(git worktree list --porcelain | awk -v br="$b" '
-      /^worktree / { path=$2 }
+      /^worktree / {
+        path = $0
+        sub(/^worktree /, "", path)
+      }
       /^branch refs\/heads\// {
         sub(/^branch refs\/heads\//, "")
         if ($0 == br && path != "") { print path; exit }
@@ -60,8 +63,8 @@ function gitsweep() {
 
     # 6. Safely delete the local branch.
     echo "   🗑️  Deleting branch: $b"
-    if ! git branch -D "$b"; then
-      echo "   ⚠️  Could not delete branch: $b"
+    if ! git branch -d "$b"; then
+      echo "   ⚠️  Could not delete branch: $b (it may be unmerged)."
     fi
   done
 
