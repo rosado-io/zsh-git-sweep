@@ -1,48 +1,91 @@
-<div align="center">
-  <img src="assets/logo.svg" alt="zsh-git-sweep logo" width="120" />
-  <h1>zsh-git-sweep</h1>
-  <p>Oh My Zsh plugin that safely sweeps away orphaned Git branches <em>and</em> their worktrees.</p>
-</div>
+# zsh-git-sweep
 
-## The Problem
+Oh My Zsh plugin that cleans up local Git branches and worktrees after pull
+requests, experiments, and AI-assisted work sessions.
 
-After a busy sprint of pull requests, your local repository is often littered with branches that have already been merged or deleted on the remote. Standard cleanup with `git branch -d` or `git fetch -p` works for simple branches, but it fails when a branch is checked out in a Git worktree:
+## Why
+
+When you use Git worktrees heavily, especially for AI coding sessions, local
+repositories quickly collect old branches and worktree directories. Some were
+already merged, some had their remote branch deleted, and some were simply left
+behind after an experiment.
+
+`git fetch -p` prunes stale remote-tracking refs, but it does not delete your
+local branches. `git branch -d` can delete safe merged branches, but it fails
+when a branch is checked out in a Git worktree:
 
 ```text
 error: Cannot delete branch 'feature-x' checked out at '/path/to/worktree'
 ```
 
-`zsh-git-sweep` automates the full cleanup: it finds branches whose upstream is `[gone]`, removes any attached worktrees, deletes the branches, and prunes leftover worktree metadata.
+`zsh-git-sweep` handles that cleanup flow for you. It finds local branches that
+are already merged into your base branch, branches whose upstream is marked
+`[gone]`, and optionally stale branches by age. It removes safe worktrees first,
+deletes the local branches, and prunes leftover worktree metadata.
+
+## Safety
+
+By default, `gitsweep` is intentionally conservative:
+
+- It targets local branches that are merged, whose upstream is `[gone]`, or
+  that you explicitly include with `--stale-days`.
+- It skips the branch you are currently on.
+- It skips protected branch names such as `main`, `master`, `trunk`, `develop`,
+  and `dev`.
+- It removes worktrees without `--force`, so dirty worktrees are preserved.
+- It only deletes branches that are already merged into the base branch.
+
+Use `gitsweep --force` only after reviewing the branch/worktree. Force mode runs
+`git worktree remove -f` and `git branch -D`, which can delete local worktree
+changes and unmerged commits.
+
+By default, the base branch is detected from `origin/HEAD`, then common branch
+names like `origin/main`, `origin/master`, `main`, and `master`. Use `--base` to
+override it.
+
+## Requirements
+
+- zsh
+- Git
+- Oh My Zsh, if you want to load it as an Oh My Zsh plugin
 
 ## Installation
 
-### Manual (Oh My Zsh)
+### Oh My Zsh
 
-1. Clone this repository into your Oh My Zsh custom plugins directory:
+Clone this repository into your Oh My Zsh custom plugins directory:
 
-   ```zsh
-   git clone https://github.com/YOUR_USERNAME/zsh-git-sweep.git \
-     ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-git-sweep
-   ```
+```zsh
+git clone https://github.com/rosado-io/zsh-git-sweep.git \
+  "${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/zsh-git-sweep"
+```
 
-2. Add `zsh-git-sweep` to the plugins array in your `~/.zshrc`:
+Add `zsh-git-sweep` to the plugins array in `~/.zshrc`:
 
-   ```zsh
-   plugins=(
-     # ... your other plugins
-     zsh-git-sweep
-   )
-   ```
+```zsh
+plugins=(
+  # ... your other plugins
+  zsh-git-sweep
+)
+```
 
-3. Reload your shell configuration:
+Reload your shell:
 
-   ```zsh
-   source ~/.zshrc
-   ```
+```zsh
+source ~/.zshrc
+```
+
+### Manual zsh
+
+You can also source the plugin directly:
+
+```zsh
+source /path/to/zsh-git-sweep/zsh-git-sweep.plugin.zsh
+```
 
 ## Usage
 
-Run the function from inside any Git repository:
+Run from inside any Git repository:
 
 ```zsh
 gitsweep
@@ -54,19 +97,74 @@ Or use the shorter alias:
 gsweep
 ```
 
-### Example Output
+Available options:
 
-When there are branches to clean:
+```text
+Usage: gitsweep [options]
+
+Options:
+  -b, --base <ref>       Compare merged branches against this base ref.
+  -f, --force            Remove unmerged/stale candidates too.
+  -n, --dry-run          Show what would be removed without changing anything.
+      --no-fetch         Skip git fetch -p before scanning.
+      --stale-days <n>   Include branches older than n days as candidates.
+  -h, --help             Show this help message.
+```
+
+### Common Workflows
+
+Preview cleanup before touching anything:
+
+```zsh
+gitsweep --dry-run
+```
+
+Clean branches merged into `origin/main` and safe worktrees:
+
+```zsh
+gitsweep --base origin/main
+```
+
+Review old forgotten branches:
+
+```zsh
+gitsweep --stale-days 30 --dry-run
+```
+
+Force-remove reviewed stale branches and their worktrees:
+
+```zsh
+gitsweep --stale-days 30 --force
+```
+
+## Examples
+
+When there are safe branches to clean:
 
 ```text
 🧹 Starting git sweep...
 🌐 Fetching and pruning remote tracking branches...
-🗑️  Found 2 orphaned branch(es): feature-a, feature-b
-🔍 Checking branch: feature-a
+🧭 Using base ref: origin/main
+🗑️  Found 2 branch(es) to inspect: feature-a, feature-b
+🔍 Checking branch: feature-a (merged into origin/main)
    📦 Removing worktree at /home/user/repos/feature-a
    🗑️  Deleting branch: feature-a
-🔍 Checking branch: feature-b
+🔍 Checking branch: feature-b (upstream gone, merged into origin/main)
    🗑️  Deleting branch: feature-b
+🧼 Running git worktree prune...
+✅ Git sweep complete!
+```
+
+When a worktree or branch is not safe to delete:
+
+```text
+🧹 Starting git sweep...
+🌐 Fetching and pruning remote tracking branches...
+🧭 Using base ref: origin/main
+🗑️  Found 1 branch(es) to inspect: feature-a
+🔍 Checking branch: feature-a (upstream gone)
+   ⚠️  Branch is not merged into origin/main; skipping.
+      Use gitsweep --force to remove it anyway.
 🧼 Running git worktree prune...
 ✅ Git sweep complete!
 ```
@@ -76,21 +174,26 @@ When everything is already clean:
 ```text
 🧹 Starting git sweep...
 🌐 Fetching and pruning remote tracking branches...
-✨ All clean! No orphaned branches found.
+🧭 Using base ref: origin/main
+✨ All clean! No sweep candidates found.
 ```
 
-## What It Does
+## Development
 
-1. Runs `git fetch -p` to prune remote-tracking references.
-2. Identifies local branches whose upstream is marked `[gone]`.
-3. For each orphaned branch, finds any associated Git worktree.
-4. Forcefully removes the worktree first (`git worktree remove -f`).
-5. Deletes the local branch (`git branch -d`).
-6. Runs `git worktree prune` for general cleanup.
+Run the local test script from the repository root:
+
+```zsh
+zsh tests/gitsweep.zsh
+```
+
+The tests create temporary Git repositories and verify the safe default behavior
+and explicit force behavior.
 
 ## Contributing
 
-Contributions are welcome! Please open an issue to discuss larger changes, and submit pull requests against the `main` branch. Keep changes focused, update the README if behavior changes, and ensure the plugin still works with the latest stable Oh My Zsh.
+Contributions are welcome. Please open an issue to discuss larger changes and
+submit pull requests against the `main` branch. Keep changes focused, update the
+README when behavior changes, and make sure the local tests pass.
 
 ## License
 
