@@ -197,13 +197,20 @@ function test_dry_run_does_not_remove_merged_branch_or_worktree() {
   merge_feature_to_main "$root/repo"
   delete_remote_feature "$root"
 
+  local output
   (
     cd "$root/repo"
-    gitsweep --dry-run >/dev/null 2>&1
+    output=$(gitsweep --dry-run 2>&1)
+    [[ "$output" == *"Dry run mode: no branches, worktrees, or Git refs will be changed."* ]] \
+      || fail "expected dry run output to say no Git refs will be changed"
+    [[ "$output" == *"Would delete branch: feature"* ]] \
+      || fail "expected dry run to detect pruned upstream without changing refs"
   )
 
   [[ -d "$root/wt-feature" ]] || fail "expected dry run to preserve worktree"
   assert_branch_exists "$root/repo" feature
+  git -C "$root/repo" show-ref --verify --quiet refs/remotes/origin/feature \
+    || fail "expected dry run to preserve remote-tracking ref"
   pass "dry run does not remove merged branch or worktree"
 }
 

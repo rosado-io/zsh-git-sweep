@@ -118,12 +118,33 @@ function gitsweep() {
   fi
 
   echo "🧹 Starting git sweep..."
+  if (( dry_run )); then
+    echo "🔎 Dry run mode: no branches, worktrees, or Git refs will be changed."
+  fi
+
+  local -A dry_run_pruned_refs
 
   if (( fetch )); then
-    echo "🌐 Fetching and pruning remote tracking branches..."
-    if ! git fetch -p; then
-      echo "❌ Failed to fetch from remote."
-      return 1
+    if (( dry_run )); then
+      echo "🌐 Checking remote tracking branches (dry run)..."
+
+      local fetch_output
+      if ! fetch_output=$(git fetch --dry-run -p 2>&1); then
+        [[ -n "$fetch_output" ]] && echo "$fetch_output"
+        echo "❌ Failed to fetch from remote."
+        return 1
+      fi
+
+      local pruned_ref
+      while IFS= read -r pruned_ref; do
+        [[ -n "$pruned_ref" ]] && dry_run_pruned_refs[$pruned_ref]=1
+      done < <(printf '%s\n' "$fetch_output" | awk '/\[deleted\]/ && / -> / { sub(/^.* -> /, ""); print }')
+    else
+      echo "🌐 Fetching and pruning remote tracking branches..."
+      if ! git fetch -p; then
+        echo "❌ Failed to fetch from remote."
+        return 1
+      fi
     fi
   else
     echo "⏭️  Skipping fetch (--no-fetch)."
@@ -143,7 +164,7 @@ function gitsweep() {
 
   echo "🧭 Using base ref: $base_ref"
 
-  local branch track
+  local branch upstream track
   local current_branch
   current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
 
@@ -161,11 +182,11 @@ function gitsweep() {
   local -a candidates
 
   local reason
-  while IFS=$'\t' read -r branch track; do
+  while IFS=$'\t' read -r branch upstream track; do
     [[ "$branch" == "$current_branch" ]] && continue
     _zsh_git_sweep_is_protected_branch "$branch" "${protected_branches[@]}" && continue
 
-    if [[ "$track" == "[gone]" ]]; then
+    if [[ "$track" == "[gone]" ]] || (( dry_run && ${+dry_run_pruned_refs[$upstream]} )); then
       reason="upstream gone"
       if (( ! ${+candidate_reasons[$branch]} )); then
         candidates+=("$branch")
@@ -174,7 +195,7 @@ function gitsweep() {
         candidate_reasons[$branch]="${candidate_reasons[$branch]}, $reason"
       fi
     fi
-  done < <(git for-each-ref --format='%(refname:short)%09%(upstream:track)' refs/heads)
+  done < <(git for-each-ref --format='%(refname:short)%09%(upstream:short)%09%(upstream:track)' refs/heads)
 
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
