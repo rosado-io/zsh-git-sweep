@@ -119,6 +119,9 @@ Preview cleanup before touching anything:
 gitsweep --dry-run
 ```
 
+Dry runs only print what would be removed. They do not delete branches,
+worktrees, or Git refs.
+
 Clean branches merged into `origin/main` and safe worktrees:
 
 ```zsh
@@ -139,20 +142,21 @@ gitsweep --stale-days 30 --force
 
 ## Examples
 
-When there are safe branches to clean:
+When previewing safe branches to clean:
 
 ```text
 🧹 Starting git sweep...
-🌐 Fetching and pruning remote tracking branches...
+🔎 Dry run mode: no branches, worktrees, or Git refs will be changed.
+🌐 Checking remote tracking branches (dry run)...
 🧭 Using base ref: origin/main
 🗑️  Found 2 branch(es) to inspect: feature-a, feature-b
 🔍 Checking branch: feature-a (merged into origin/main)
-   📦 Removing worktree at /home/user/repos/feature-a
-   🗑️  Deleting branch: feature-a
+   📦 Would remove worktree at /home/user/repos/feature-a
+   🗑️  Would delete branch: feature-a
 🔍 Checking branch: feature-b (upstream gone, merged into origin/main)
-   🗑️  Deleting branch: feature-b
-🧼 Running git worktree prune...
-✅ Git sweep complete!
+   🗑️  Would delete branch: feature-b
+🧼 Would run git worktree prune
+✅ Dry run complete!
 ```
 
 When a worktree or branch is not safe to delete:
