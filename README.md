@@ -1,5 +1,8 @@
 # zsh-git-sweep
 
+[![Test](https://github.com/rosado-io/zsh-git-sweep/actions/workflows/test.yml/badge.svg)](https://github.com/rosado-io/zsh-git-sweep/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Oh My Zsh plugin that cleans up local Git branches and worktrees after pull
 requests, experiments, and AI-assisted work sessions.
 
@@ -43,6 +46,15 @@ By default, the base branch is detected from `origin/HEAD`, then common branch
 names like `origin/main`, `origin/master`, `main`, and `master`. Use `--base` to
 override it.
 
+If you are running it in a repository you care about, start with:
+
+```zsh
+gitsweep --dry-run
+```
+
+Dry-run mode is designed to preview cleanup without changing branches,
+worktrees, or Git refs.
+
 ## Requirements
 
 - zsh
@@ -81,6 +93,26 @@ You can also source the plugin directly:
 
 ```zsh
 source /path/to/zsh-git-sweep/zsh-git-sweep.plugin.zsh
+```
+
+### Plugin Managers
+
+With [zinit](https://github.com/zdharma-continuum/zinit):
+
+```zsh
+zinit light rosado-io/zsh-git-sweep
+```
+
+With [antidote](https://getantidote.github.io/):
+
+```zsh
+antidote bundle rosado-io/zsh-git-sweep
+```
+
+With [Antigen](https://github.com/zsh-users/antigen):
+
+```zsh
+antigen bundle rosado-io/zsh-git-sweep
 ```
 
 ## Usage
@@ -182,6 +214,39 @@ When everything is already clean:
 ✨ All clean! No sweep candidates found.
 ```
 
+## Comparison With Built-in Git Commands
+
+`gitsweep` wraps a few common cleanup primitives into one conservative workflow:
+
+| Command | What it does | What `gitsweep` adds |
+| --- | --- | --- |
+| `git fetch -p` | Prunes stale remote-tracking refs. | Can detect local branches whose upstream is gone, then remove the local branch when it is safe. |
+| `git branch -d` | Deletes a local branch only when Git considers it merged. | Removes a linked worktree first, then deletes the local branch. |
+| `git worktree prune` | Removes stale worktree administrative files. | Runs after branch/worktree cleanup so leftover metadata is tidied up. |
+
+## FAQ
+
+### Does dry-run mutate refs?
+
+No. In dry-run mode, `gitsweep` uses `git fetch --dry-run -p` to preview pruned
+remote-tracking refs and only prints what it would remove.
+
+### What does `--force` delete?
+
+`--force` uses `git worktree remove -f` and `git branch -D` for branches that
+`gitsweep` has selected as candidates. Review `gitsweep --dry-run` output before
+using it.
+
+### What happens to dirty worktrees?
+
+Without `--force`, dirty worktrees are skipped and their branches are preserved.
+With `--force`, local worktree changes can be deleted.
+
+### How is the base branch detected?
+
+`gitsweep` first checks `origin/HEAD`, then common names such as `origin/main`,
+`origin/master`, `main`, and `master`. Pass `--base <ref>` to choose explicitly.
+
 ## Development
 
 Run the local test script from the repository root:
@@ -195,9 +260,12 @@ and explicit force behavior.
 
 ## Contributing
 
-Contributions are welcome. Please open an issue to discuss larger changes and
-submit pull requests against the `main` branch. Keep changes focused, update the
-README when behavior changes, and make sure the local tests pass.
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md)
+before opening a pull request.
+
+For security-sensitive behavior, see [SECURITY.md](SECURITY.md).
+
+Release notes are tracked in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

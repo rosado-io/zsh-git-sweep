@@ -318,6 +318,34 @@ function test_skips_current_branch() {
   pass "skips current branch"
 }
 
+function test_removes_branch_with_slash_and_dot() {
+  local root
+  root=$(make_temp_dir)
+  local branch="topic/sweep.demo-123"
+
+  setup_repo "$root"
+
+  (
+    cd "$root/repo"
+    git checkout -b "$branch" main >/dev/null 2>&1
+    print -- "nested" > nested.txt
+    git add nested.txt
+    git commit -m "nested branch" >/dev/null
+    git checkout main >/dev/null 2>&1
+    git merge --ff-only "$branch" >/dev/null
+    git worktree add "$root/wt-nested" "$branch" >/dev/null 2>&1
+  )
+
+  (
+    cd "$root/repo"
+    gitsweep --base main --no-fetch >/dev/null 2>&1
+  )
+
+  [[ ! -d "$root/wt-nested" ]] || fail "expected nested branch worktree to be removed"
+  assert_branch_missing "$root/repo" "$branch"
+  pass "removes branch with slash and dot"
+}
+
 test_removes_clean_merged_worktree
 test_removes_merged_branch_when_remote_still_exists
 test_keeps_dirty_unmerged_worktree_by_default
@@ -326,3 +354,4 @@ test_keeps_dirty_merged_worktree_by_default
 test_force_removes_dirty_unmerged_worktree
 test_stale_unmerged_branch_requires_force
 test_skips_current_branch
+test_removes_branch_with_slash_and_dot

@@ -1,0 +1,44 @@
+name: Bug report
+description: Report unexpected gitsweep behavior
+title: "Bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please avoid sharing private branch names,
+        repository paths, or tokens if they are sensitive.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the behavior you saw and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Which command did you run?
+      render: zsh
+      placeholder: gitsweep --dry-run
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Paste relevant output. Redact private paths or branch names if needed.
+      render: text
+  - type: input
+    id: git-version
+    attributes:
+      label: Git version
+      placeholder: git version 2.50.0
+  - type: input
+    id: zsh-version
+    attributes:
+      label: zsh version
+      placeholder: zsh 5.9
+
