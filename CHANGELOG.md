@@ -15,5 +15,7 @@ for tagged releases.
 - Optional stale branch review with `--stale-days`.
 - Conservative dry-run mode with `--dry-run`.
 - Force mode for explicitly reviewed destructive cleanup.
+- Remote cleanup for branches already merged into the primary branch.
+- Remote cleanup for deleting all branches except the primary branch.
+- Short aliases for remote cleanup commands.
 - Local integration tests for branch and worktree cleanup behavior.
-

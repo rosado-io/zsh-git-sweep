@@ -15,6 +15,32 @@ Options:
 EOF
 }
 
+function _zsh_git_sweep_remote_merged_usage() {
+  cat <<'EOF'
+Usage: gitsweep-remote-merged [options]
+
+Options:
+  -r, --remote <name>    Delete branches from this remote.
+  -b, --base <ref>       Compare merged remote branches against this base ref.
+  -n, --dry-run          Show what would be removed without changing anything.
+      --no-fetch         Skip git fetch -p <remote> before scanning.
+  -h, --help             Show this help message.
+EOF
+}
+
+function _zsh_git_sweep_remote_all_usage() {
+  cat <<'EOF'
+Usage: gitsweep-remote-all [options]
+
+Options:
+  -r, --remote <name>    Delete branches from this remote.
+  -b, --base <ref>       Keep this base ref as the primary branch.
+  -n, --dry-run          Show what would be removed without changing anything.
+      --no-fetch         Skip git fetch -p <remote> before scanning.
+  -h, --help             Show this help message.
+EOF
+}
+
 function _zsh_git_sweep_default_base() {
   local origin_head
   origin_head=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
@@ -40,6 +66,61 @@ function _zsh_git_sweep_default_base() {
   return 1
 }
 
+function _zsh_git_sweep_default_remote() {
+  if git remote get-url origin >/dev/null 2>&1; then
+    echo "origin"
+    return 0
+  fi
+
+  local remote
+  remote=$(git remote | sed -n '1p')
+  if [[ -n "$remote" ]]; then
+    echo "$remote"
+    return 0
+  fi
+
+  return 1
+}
+
+function _zsh_git_sweep_default_remote_base() {
+  local remote=$1
+  local remote_head
+  remote_head=$(git symbolic-ref --quiet --short "refs/remotes/$remote/HEAD" 2>/dev/null)
+
+  if [[ -n "$remote_head" ]]; then
+    echo "$remote_head"
+    return 0
+  fi
+
+  local branch ref
+  for branch in main master trunk develop dev; do
+    ref="$remote/$branch"
+    if git rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+      echo "$ref"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+function _zsh_git_sweep_branch_name_from_ref() {
+  local ref=$1
+  local remote=${2:-}
+  local branch=$ref
+
+  branch=${branch#refs/heads/}
+  branch=${branch#refs/remotes/}
+
+  if [[ -n "$remote" ]]; then
+    branch=${branch#${remote}/}
+  elif [[ "$branch" == */* ]]; then
+    branch=${branch#*/}
+  fi
+
+  echo "$branch"
+}
+
 function _zsh_git_sweep_is_protected_branch() {
   local branch=$1
   shift
@@ -52,6 +133,180 @@ function _zsh_git_sweep_is_protected_branch() {
   done
 
   return 1
+}
+
+function _zsh_git_sweep_remote_sweep() {
+  emulate -L zsh
+
+  local mode=$1
+  local usage_func=$2
+  shift 2
+
+  local base_ref=""
+  local dry_run=0
+  local fetch=1
+  local remote=""
+
+  while (( $# > 0 )); do
+    case "$1" in
+      -r|--remote)
+        if (( $# < 2 )); then
+          echo "🚨 Missing value for $1"
+          $usage_func
+          return 2
+        fi
+        remote=$2
+        shift
+        ;;
+      -b|--base)
+        if (( $# < 2 )); then
+          echo "🚨 Missing value for $1"
+          $usage_func
+          return 2
+        fi
+        base_ref=$2
+        shift
+        ;;
+      -n|--dry-run)
+        dry_run=1
+        ;;
+      --no-fetch)
+        fetch=0
+        ;;
+      -h|--help)
+        $usage_func
+        return 0
+        ;;
+      *)
+        echo "🚨 Unknown option: $1"
+        $usage_func
+        return 2
+        ;;
+    esac
+    shift
+  done
+
+  if ! git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "🚨 Not a Git repository."
+    return 1
+  fi
+
+  if [[ -z "$remote" ]]; then
+    if ! remote=$(_zsh_git_sweep_default_remote); then
+      echo "❌ Could not determine a remote."
+      return 1
+    fi
+  fi
+
+  if ! git remote get-url "$remote" >/dev/null 2>&1; then
+    echo "❌ Remote not found: $remote"
+    return 1
+  fi
+
+  echo "🧹 Starting remote git sweep..."
+  if (( dry_run )); then
+    echo "🔎 Dry run mode: no remote branches or Git refs will be changed."
+  fi
+
+  if (( fetch )); then
+    if (( dry_run )); then
+      echo "🌐 Checking remote branches on $remote (dry run)..."
+      if ! git fetch --dry-run -p "$remote"; then
+        echo "❌ Failed to fetch from remote: $remote"
+        return 1
+      fi
+    else
+      echo "🌐 Fetching and pruning $remote..."
+      if ! git fetch -p "$remote"; then
+        echo "❌ Failed to fetch from remote: $remote"
+        return 1
+      fi
+    fi
+  else
+    echo "⏭️  Skipping fetch (--no-fetch)."
+  fi
+
+  if [[ -z "$base_ref" ]]; then
+    if ! base_ref=$(_zsh_git_sweep_default_remote_base "$remote"); then
+      echo "❌ Could not determine the primary branch for $remote."
+      return 1
+    fi
+  fi
+
+  if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+    echo "❌ Base ref not found: $base_ref"
+    return 1
+  fi
+
+  local base_branch
+  base_branch=$(_zsh_git_sweep_branch_name_from_ref "$base_ref" "$remote")
+
+  echo "🧭 Using remote: $remote"
+  echo "🧭 Using primary/base ref: $base_ref"
+
+  local -a protected_branches candidates
+  protected_branches=("$base_branch")
+
+  local -A candidate_reasons
+  local remote_ref branch reason
+  while IFS= read -r remote_ref; do
+    [[ -z "$remote_ref" ]] && continue
+
+    branch=${remote_ref#${remote}/}
+    [[ "$branch" == "HEAD" ]] && continue
+    _zsh_git_sweep_is_protected_branch "$branch" "${protected_branches[@]}" && continue
+
+    if [[ "$mode" == "merged" ]]; then
+      if git merge-base --is-ancestor "$remote_ref" "$base_ref"; then
+        reason="merged into $base_ref"
+      else
+        continue
+      fi
+    else
+      reason="not primary branch"
+    fi
+
+    candidates+=("$branch")
+    candidate_reasons[$branch]=$reason
+  done < <(git for-each-ref --format='%(refname:short)' "refs/remotes/$remote")
+
+  if (( ${#candidates} == 0 )); then
+    echo "✨ All clean! No remote branch candidates found."
+    return 0
+  fi
+
+  echo "🗑️  Found ${#candidates} remote branch(es) to delete: ${(j:, :)candidates}"
+
+  local deleted_count=0
+  for branch in "${candidates[@]}"; do
+    echo "🔍 Checking remote branch: $remote/$branch (${candidate_reasons[$branch]})"
+
+    if (( dry_run )); then
+      echo "   🗑️  Would delete remote branch: $remote/$branch"
+      continue
+    fi
+
+    echo "   🗑️  Deleting remote branch: $remote/$branch"
+    if git push "$remote" --delete "$branch"; then
+      deleted_count=$(( deleted_count + 1 ))
+    else
+      echo "   ⚠️  Could not delete remote branch: $remote/$branch."
+    fi
+  done
+
+  if (( dry_run )); then
+    echo "✅ Dry run complete!"
+    return 0
+  fi
+
+  if (( deleted_count > 0 )); then
+    echo "🌐 Pruning deleted remote-tracking refs from $remote..."
+    if ! git fetch -p "$remote"; then
+      echo "⚠️  Deleted remote branches, but could not prune local remote-tracking refs."
+    fi
+  fi
+
+  echo "✅ Remote git sweep complete!"
 }
 
 function gitsweep() {
@@ -329,5 +584,15 @@ function gitsweep() {
   echo "✅ Git sweep complete!"
 }
 
+function gitsweep-remote-merged() {
+  _zsh_git_sweep_remote_sweep merged _zsh_git_sweep_remote_merged_usage "$@"
+}
+
+function gitsweep-remote-all() {
+  _zsh_git_sweep_remote_sweep all _zsh_git_sweep_remote_all_usage "$@"
+}
+
 # Optional alias.
 alias gsweep='gitsweep'
+alias gsweep-rm='gitsweep-remote-merged'
+alias gsweep-ra='gitsweep-remote-all'

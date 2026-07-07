@@ -3,7 +3,8 @@
 Thanks for considering a contribution to `zsh-git-sweep`.
 
 This project is intentionally small: it should stay easy to audit, easy to
-install, and conservative by default because it deletes local Git state.
+install, and conservative by default because it deletes local and remote Git
+state.
 
 ## Development Setup
 
@@ -37,6 +38,8 @@ By default, `gitsweep` should not delete dirty worktrees, the current branch,
 protected base branches, or unmerged branch work unless the user explicitly
 passes `--force`.
 
+Remote cleanup commands should keep dry-run behavior non-mutating and must never
+delete the detected primary/base branch.
+
 Changes that expand deletion behavior should be reviewed carefully and covered
 by tests.
-

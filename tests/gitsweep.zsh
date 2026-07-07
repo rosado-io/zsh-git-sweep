@@ -96,6 +96,20 @@ function merge_feature_to_main() {
   )
 }
 
+function create_remote_branch() {
+  local root=$1
+  local branch=$2
+
+  (
+    cd "$root/seed"
+    git checkout main >/dev/null 2>&1
+    git checkout -b "$branch" >/dev/null 2>&1
+    git commit --allow-empty -m "$branch" >/dev/null
+    git push -u origin "$branch" >/dev/null 2>&1
+    git checkout main >/dev/null 2>&1
+  )
+}
+
 function assert_branch_exists() {
   local repo=$1
   local branch=$2
@@ -110,6 +124,22 @@ function assert_branch_missing() {
 
   ! git -C "$repo" show-ref --verify --quiet "refs/heads/$branch" \
     || fail "expected branch '$branch' to be deleted"
+}
+
+function assert_remote_branch_exists() {
+  local root=$1
+  local branch=$2
+
+  git --git-dir="$root/remote.git" show-ref --verify --quiet "refs/heads/$branch" \
+    || fail "expected remote branch '$branch' to exist"
+}
+
+function assert_remote_branch_missing() {
+  local root=$1
+  local branch=$2
+
+  ! git --git-dir="$root/remote.git" show-ref --verify --quiet "refs/heads/$branch" \
+    || fail "expected remote branch '$branch' to be deleted"
 }
 
 function test_removes_clean_merged_worktree() {
@@ -346,6 +376,95 @@ function test_removes_branch_with_slash_and_dot() {
   pass "removes branch with slash and dot"
 }
 
+function test_remote_merged_dry_run_preserves_remote_branch() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+  merge_feature_to_main "$root/repo"
+
+  local output
+  (
+    cd "$root/repo"
+    output=$(gitsweep-remote-merged --dry-run 2>&1)
+    [[ "$output" == *"Dry run mode: no remote branches or Git refs will be changed."* ]] \
+      || fail "expected remote dry run output to say no remote refs will be changed"
+    [[ "$output" == *"Would delete remote branch: origin/feature"* ]] \
+      || fail "expected remote dry run to detect merged remote branch"
+  )
+
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_exists "$root" feature
+  pass "remote merged dry run preserves remote branches"
+}
+
+function test_remote_merged_deletes_only_merged_remote_branch() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+  create_remote_branch "$root" wip
+  merge_feature_to_main "$root/repo"
+
+  (
+    cd "$root/repo"
+    gitsweep-remote-merged >/dev/null 2>&1
+  )
+
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_exists "$root" wip
+  assert_remote_branch_missing "$root" feature
+  pass "remote merged deletes only merged remote branches"
+}
+
+function test_remote_all_dry_run_preserves_remote_branches() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+
+  local output
+  (
+    cd "$root/repo"
+    output=$(gitsweep-remote-all --dry-run 2>&1)
+    [[ "$output" == *"Would delete remote branch: origin/feature"* ]] \
+      || fail "expected remote all dry run to preview feature deletion"
+  )
+
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_exists "$root" feature
+  pass "remote all dry run preserves remote branches"
+}
+
+function test_remote_all_deletes_everything_except_primary() {
+  local root
+  root=$(make_temp_dir)
+  local nested_branch="topic/sweep.demo-123"
+
+  setup_repo "$root"
+  create_remote_branch "$root" wip
+  create_remote_branch "$root" "$nested_branch"
+
+  (
+    cd "$root/repo"
+    gitsweep-remote-all >/dev/null 2>&1
+  )
+
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_missing "$root" feature
+  assert_remote_branch_missing "$root" wip
+  assert_remote_branch_missing "$root" "$nested_branch"
+  pass "remote all deletes everything except primary"
+}
+
+function test_remote_aliases_are_registered() {
+  [[ "$(alias gsweep-rm)" == "gsweep-rm=gitsweep-remote-merged" ]] \
+    || fail "expected gsweep-rm alias to point to gitsweep-remote-merged"
+  [[ "$(alias gsweep-ra)" == "gsweep-ra=gitsweep-remote-all" ]] \
+    || fail "expected gsweep-ra alias to point to gitsweep-remote-all"
+  pass "remote aliases are registered"
+}
+
 test_removes_clean_merged_worktree
 test_removes_merged_branch_when_remote_still_exists
 test_keeps_dirty_unmerged_worktree_by_default
@@ -355,3 +474,8 @@ test_force_removes_dirty_unmerged_worktree
 test_stale_unmerged_branch_requires_force
 test_skips_current_branch
 test_removes_branch_with_slash_and_dot
+test_remote_merged_dry_run_preserves_remote_branch
+test_remote_merged_deletes_only_merged_remote_branch
+test_remote_all_dry_run_preserves_remote_branches
+test_remote_all_deletes_everything_except_primary
+test_remote_aliases_are_registered
