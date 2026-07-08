@@ -248,9 +248,10 @@ function _zsh_git_sweep_remote_sweep() {
   protected_branches=("$base_branch")
 
   local -A candidate_reasons
-  local remote_ref branch reason
-  while IFS= read -r remote_ref; do
+  local remote_ref symref branch reason
+  while IFS=$'\t' read -r remote_ref symref; do
     [[ -z "$remote_ref" ]] && continue
+    [[ -n "$symref" ]] && continue
 
     branch=${remote_ref#${remote}/}
     [[ "$branch" == "HEAD" ]] && continue
@@ -268,7 +269,7 @@ function _zsh_git_sweep_remote_sweep() {
 
     candidates+=("$branch")
     candidate_reasons[$branch]=$reason
-  done < <(git for-each-ref --format='%(refname:short)' "refs/remotes/$remote")
+  done < <(git for-each-ref --format='%(refname:short)%09%(symref)' "refs/remotes/$remote")
 
   if (( ${#candidates} == 0 )); then
     echo "✨ All clean! No remote branch candidates found."

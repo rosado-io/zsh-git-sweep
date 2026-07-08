@@ -429,6 +429,8 @@ function test_remote_all_dry_run_preserves_remote_branches() {
     output=$(gitsweep-remote-all --dry-run 2>&1)
     [[ "$output" == *"Would delete remote branch: origin/feature"* ]] \
       || fail "expected remote all dry run to preview feature deletion"
+    [[ "$output" != *"origin/origin"* ]] \
+      || fail "expected remote all dry run to skip origin HEAD symbolic ref"
   )
 
   assert_remote_branch_exists "$root" main

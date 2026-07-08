@@ -8,6 +8,12 @@ for tagged releases.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-08
+
+### Fixed
+
+- Skip remote HEAD symbolic refs during remote branch sweeps.
+
 ## [0.2.0] - 2026-07-08
 
 ### Added
