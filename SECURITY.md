@@ -1,8 +1,8 @@
 # Security Policy
 
-`zsh-git-sweep` is a local shell plugin that can delete local Git branches and
-worktrees when invoked by the user. The main safety goal is to avoid surprising
-or implicit destructive behavior.
+`zsh-git-sweep` is a local shell plugin that can delete local Git branches,
+worktrees, and explicitly selected remote Git branches when invoked by the user.
+The main safety goal is to avoid surprising or implicit destructive behavior.
 
 ## Supported Versions
 
@@ -22,6 +22,7 @@ Useful reports include:
 - expected behavior
 - actual behavior
 - whether `--force` was used
+- whether a remote cleanup command was used
 - Git and zsh versions
 
 ## Safety-Sensitive Behavior
@@ -29,8 +30,8 @@ Useful reports include:
 Please treat these as security-sensitive areas:
 
 - deleting unmerged branches
+- deleting remote branches with `git push --delete`
 - removing dirty worktrees
 - parsing branch names and worktree paths
 - handling protected branch names
 - dry-run behavior that must not mutate Git refs or worktrees
-
