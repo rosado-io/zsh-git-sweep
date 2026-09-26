@@ -467,6 +467,184 @@ function test_remote_aliases_are_registered() {
   pass "remote aliases are registered"
 }
 
+function test_all_dry_run_preserves_local_and_remote_branches() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+  merge_feature_to_main "$root/repo"
+
+  (
+    cd "$root/repo"
+    git worktree add "$root/wt-feature" feature >/dev/null 2>&1
+  )
+
+  local output
+  (
+    cd "$root/repo"
+    output=$(gitsweep-all --dry-run 2>&1)
+    [[ "$output" == *"Dry run mode: no branches, worktrees, remote branches, or Git refs will be changed."* ]] \
+      || fail "expected full dry run output to say nothing will be changed"
+    [[ "$output" == *"Would delete remote branch: origin/feature"* ]] \
+      || fail "expected full dry run to preview remote branch deletion"
+    [[ "$output" == *"Would remove worktree at"* ]] \
+      || fail "expected full dry run to preview worktree removal"
+    [[ "$output" == *"Would delete branch: feature"* ]] \
+      || fail "expected full dry run to preview local branch deletion"
+  )
+
+  [[ -d "$root/wt-feature" ]] || fail "expected full dry run to preserve worktree"
+  assert_branch_exists "$root/repo" feature
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_exists "$root" feature
+  git -C "$root/repo" show-ref --verify --quiet refs/remotes/origin/feature \
+    || fail "expected full dry run to preserve remote-tracking ref"
+  pass "full sweep dry run preserves local and remote branches"
+}
+
+function test_all_refuses_to_run_off_primary_branch() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+
+  local output
+  (
+    cd "$root/repo"
+    git checkout feature >/dev/null 2>&1
+
+    local exit_code=0
+    output=$(gitsweep-all 2>&1) || exit_code=$?
+    (( exit_code != 0 )) || fail "expected full sweep to fail off the primary branch"
+    [[ "$output" == *"Switch first with: git switch main"* ]] \
+      || fail "expected full sweep to tell the user to switch to the primary branch"
+  )
+
+  assert_branch_exists "$root/repo" feature
+  assert_remote_branch_exists "$root" feature
+  pass "full sweep refuses to run off the primary branch"
+}
+
+function test_all_deletes_every_non_primary_branch() {
+  local root
+  root=$(make_temp_dir)
+  local nested_branch="topic/sweep.demo-123"
+
+  setup_repo "$root"
+  merge_feature_to_main "$root/repo"
+  create_remote_branch "$root" wip
+  create_remote_branch "$root" "$nested_branch"
+
+  (
+    cd "$root/repo"
+    git worktree add "$root/wt-feature" feature >/dev/null 2>&1
+    git branch local-only main
+    gitsweep-all >/dev/null 2>&1
+  )
+
+  [[ ! -d "$root/wt-feature" ]] || fail "expected full sweep to remove worktree"
+  assert_branch_exists "$root/repo" main
+  assert_branch_missing "$root/repo" feature
+  assert_branch_missing "$root/repo" local-only
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_missing "$root" feature
+  assert_remote_branch_missing "$root" wip
+  assert_remote_branch_missing "$root" "$nested_branch"
+  [[ -z "$(git -C "$root/repo" for-each-ref --format='%(refname)' refs/remotes/origin | grep -v -e '/HEAD$' -e '/main$')" ]] \
+    || fail "expected full sweep to prune remote-tracking refs"
+  pass "full sweep deletes every non-primary local and remote branch"
+}
+
+function test_all_requires_force_for_unmerged_and_dirty_work() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+
+  (
+    cd "$root/repo"
+    git branch done main
+    git worktree add "$root/wt-done" done >/dev/null 2>&1
+    print -- "dirty" > "$root/wt-done/dirty.txt"
+  )
+
+  local output
+  (
+    cd "$root/repo"
+
+    local exit_code=0
+    output=$(gitsweep-all 2>&1) || exit_code=$?
+    (( exit_code != 0 )) || fail "expected full sweep to fail when branches are left behind"
+    [[ "$output" == *"Branch is not merged into origin/main; skipping."* ]] \
+      || fail "expected full sweep to skip unmerged branch without force"
+    [[ "$output" == *"Worktree has local changes; skipping branch."* ]] \
+      || fail "expected full sweep to skip dirty worktree without force"
+    [[ "$output" == *"left behind: done, feature"* ]] \
+      || fail "expected full sweep to report branches left behind"
+  )
+
+  [[ -d "$root/wt-done" ]] || fail "expected dirty worktree to be preserved without force"
+  assert_branch_exists "$root/repo" feature
+  assert_branch_exists "$root/repo" done
+  assert_remote_branch_missing "$root" feature
+
+  (
+    cd "$root/repo"
+    gitsweep-all --force >/dev/null 2>&1
+  )
+
+  [[ ! -d "$root/wt-done" ]] || fail "expected force to remove dirty worktree"
+  assert_branch_missing "$root/repo" feature
+  assert_branch_missing "$root/repo" done
+  assert_branch_exists "$root/repo" main
+  pass "full sweep requires force for unmerged branches and dirty worktrees"
+}
+
+function test_all_reports_partial_remote_failure() {
+  local root
+  root=$(make_temp_dir)
+
+  setup_repo "$root"
+  merge_feature_to_main "$root/repo"
+  create_remote_branch "$root" locked
+  create_remote_branch "$root" wip
+
+  cat > "$root/remote.git/hooks/pre-receive" <<'EOF'
+#!/bin/sh
+while read old new ref; do
+  if [ "$ref" = "refs/heads/locked" ]; then
+    echo "locked branch cannot be changed" >&2
+    exit 1
+  fi
+done
+EOF
+  chmod +x "$root/remote.git/hooks/pre-receive"
+
+  local output
+  (
+    cd "$root/repo"
+
+    local exit_code=0
+    output=$(gitsweep-all 2>&1) || exit_code=$?
+    (( exit_code != 0 )) || fail "expected full sweep to fail on partial remote failure"
+    [[ "$output" == *"left behind: origin/locked"* ]] \
+      || fail "expected full sweep to report the remote branch left behind"
+  )
+
+  assert_remote_branch_exists "$root" main
+  assert_remote_branch_exists "$root" locked
+  assert_remote_branch_missing "$root" feature
+  assert_remote_branch_missing "$root" wip
+  assert_branch_missing "$root/repo" feature
+  pass "full sweep reports partial remote failure"
+}
+
+function test_all_alias_is_registered() {
+  [[ "$(alias gsweep-a)" == "gsweep-a=gitsweep-all" ]] \
+    || fail "expected gsweep-a alias to point to gitsweep-all"
+  pass "full sweep alias is registered"
+}
+
 test_removes_clean_merged_worktree
 test_removes_merged_branch_when_remote_still_exists
 test_keeps_dirty_unmerged_worktree_by_default
@@ -481,3 +659,9 @@ test_remote_merged_deletes_only_merged_remote_branch
 test_remote_all_dry_run_preserves_remote_branches
 test_remote_all_deletes_everything_except_primary
 test_remote_aliases_are_registered
+test_all_dry_run_preserves_local_and_remote_branches
+test_all_refuses_to_run_off_primary_branch
+test_all_deletes_every_non_primary_branch
+test_all_requires_force_for_unmerged_and_dirty_work
+test_all_reports_partial_remote_failure
+test_all_alias_is_registered

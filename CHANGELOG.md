@@ -8,6 +8,13 @@ for tagged releases.
 
 ## [Unreleased]
 
+### Added
+
+- `gitsweep-all` (alias `gsweep-a`) to delete every non-primary local and
+  remote branch in one command, with a combined dry run, a primary-branch
+  check, a `--force` gate for unmerged or dirty local work, and a nonzero exit
+  when anything is left behind.
+
 ## [0.2.1] - 2026-07-08
 
 ### Fixed
