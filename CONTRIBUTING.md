@@ -41,5 +41,9 @@ passes `--force`.
 Remote cleanup commands should keep dry-run behavior non-mutating and must never
 delete the detected primary/base branch.
 
+`gitsweep-all` must only run from the primary branch, must not delete unmerged
+local branches or dirty worktrees without `--force`, and must exit nonzero when
+anything is left behind.
+
 Changes that expand deletion behavior should be reviewed carefully and covered
 by tests.

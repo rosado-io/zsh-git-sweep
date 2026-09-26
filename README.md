@@ -61,12 +61,28 @@ first configured remote. The primary branch is detected from `<remote>/HEAD`,
 then common branch names such as `<remote>/main` and `<remote>/master`. Use
 `--remote` and `--base` to choose explicitly.
 
+`gitsweep-all` is the deliberate "keep only the primary branch" reset. It is the
+most destructive command in this plugin:
+
+- It deletes every branch on the selected remote except the primary branch,
+  including remote branches other people may be using.
+- It deletes every local branch except the primary branch, including names such
+  as `develop` that `gitsweep` normally protects, and removes their worktrees.
+- It refuses to run unless the primary branch is checked out, so the current
+  branch is never left behind by accident.
+- Without `--force`, it skips local branches that are not merged into the
+  primary branch and worktrees with local changes. With `--force`, those
+  unmerged commits and local changes are deleted.
+- It lists everything it could not delete and exits nonzero when anything is
+  left behind.
+
 If you are running it in a repository you care about, start with:
 
 ```zsh
 gitsweep --dry-run
 gitsweep-remote-merged --dry-run
 gitsweep-remote-all --dry-run
+gitsweep-all --dry-run
 ```
 
 Dry-run mode is designed to preview cleanup without changing branches,
@@ -153,12 +169,19 @@ gitsweep-remote-merged
 gitsweep-remote-all
 ```
 
+Local and remote cleanup in one command:
+
+```zsh
+gitsweep-all
+```
+
 Short aliases:
 
 ```zsh
 gsweep        # gitsweep
 gsweep-rm     # gitsweep-remote-merged
 gsweep-ra     # gitsweep-remote-all
+gsweep-a      # gitsweep-all
 ```
 
 Available options:
@@ -192,6 +215,21 @@ Usage: gitsweep-remote-all [options]
 Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Keep this base ref as the primary branch.
+  -n, --dry-run          Show what would be removed without changing anything.
+      --no-fetch         Skip git fetch -p <remote> before scanning.
+  -h, --help             Show this help message.
+```
+
+```text
+Usage: gitsweep-all [options]
+
+Delete every local and remote branch except the primary branch.
+Run it while the primary branch is checked out.
+
+Options:
+  -r, --remote <name>    Delete branches from this remote.
+  -b, --base <ref>       Keep this base ref as the primary branch.
+  -f, --force            Also remove unmerged local branches and dirty worktrees.
   -n, --dry-run          Show what would be removed without changing anything.
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
@@ -245,6 +283,21 @@ Choose a remote or primary branch explicitly:
 ```zsh
 gitsweep-remote-merged --remote upstream --base upstream/main
 gitsweep-remote-all --remote origin --base origin/main
+```
+
+Reset a repository to only the primary branch, locally and on the remote:
+
+```zsh
+git switch main
+gsweep-a --dry-run
+gsweep-a
+```
+
+If it reports unmerged branches or dirty worktrees left behind, review them and
+rerun with `--force` to delete them too:
+
+```zsh
+gsweep-a --force
 ```
 
 ## Examples
@@ -331,6 +384,13 @@ With `--force`, local worktree changes can be deleted.
 
 It keeps the primary/base branch only. By default that is detected from
 `<remote>/HEAD`; pass `--base <ref>` if you want to preserve a specific branch.
+
+### How is `gitsweep-all` different from running the other commands?
+
+`gitsweep-all` combines `gitsweep-remote-all` with a local sweep of every
+non-primary branch, not only merged, gone, or stale ones. It previews both
+sides in one `--dry-run`, requires the primary branch to be checked out, and
+exits nonzero if any local or remote branch is left behind.
 
 ## Development
 
