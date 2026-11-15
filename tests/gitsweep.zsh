@@ -9,12 +9,15 @@ readonly PLUGIN_PATH="$REPO_ROOT/zsh-git-sweep.plugin.zsh"
 
 source "$PLUGIN_PATH"
 
-typeset -a TEMP_DIRS
+# Keep all fixtures under one parent. make_temp_dir runs in command substitution,
+# so appending to an array there would not register directories in this process.
+readonly TEST_ROOT=$(mktemp -d)
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_TERMINAL_PROMPT=0
 
 function cleanup() {
-  if (( ${#TEMP_DIRS} > 0 )); then
-    rm -rf "${TEMP_DIRS[@]}"
-  fi
+  rm -rf -- "$TEST_ROOT"
 }
 
 trap cleanup EXIT
@@ -34,17 +37,14 @@ function configure_repo() {
 }
 
 function make_temp_dir() {
-  local root
-  root=$(mktemp -d)
-  TEMP_DIRS+=("$root")
-  print -- "$root"
+  mktemp -d "$TEST_ROOT/case.XXXXXX"
 }
 
 function setup_repo() {
   local root=$1
 
-  git init --bare "$root/remote.git" >/dev/null
-  git init "$root/seed" >/dev/null
+  git init -q --bare "$root/remote.git" >/dev/null
+  git init -q "$root/seed" >/dev/null
 
   (
     cd "$root/seed"
@@ -665,3 +665,5 @@ test_all_deletes_every_non_primary_branch
 test_all_requires_force_for_unmerged_and_dirty_work
 test_all_reports_partial_remote_failure
 test_all_alias_is_registered
+
+source "$TEST_DIR/regressions.zsh"

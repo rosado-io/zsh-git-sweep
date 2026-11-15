@@ -6,8 +6,8 @@ The main safety goal is to avoid surprising or implicit destructive behavior.
 
 ## Supported Versions
 
-The latest commit on the `main` branch is supported until tagged releases are
-introduced.
+The latest tagged release (currently `v0.3.0`) and the latest commit on `main`
+are supported. Upgrade older releases to receive security and safety fixes.
 
 ## Reporting a Vulnerability
 
@@ -35,3 +35,11 @@ Please treat these as security-sensitive areas:
 - parsing branch names and worktree paths
 - handling protected branch names
 - dry-run behavior that must not mutate Git refs or worktrees
+- preserving branches updated remotely between scanning and deletion
+- respecting configured protection even in force mode
+- treating failed worktree inspection as unsafe to delete
+
+The plugin has no third-party runtime package dependencies; Git and zsh are
+provided by the host. Keep those installations patched through your operating
+system or package manager. CI actions are pinned to full commit hashes and
+tracked by Dependabot.

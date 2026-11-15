@@ -9,6 +9,7 @@ Options:
   -b, --base <ref>       Compare merged branches against this base ref.
   -f, --force            Remove unmerged/stale candidates too.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p before scanning.
       --stale-days <n>   Include branches older than n days as candidates.
   -h, --help             Show this help message.
@@ -23,6 +24,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Compare merged remote branches against this base ref.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
 EOF
@@ -36,6 +38,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Keep this base ref as the primary branch.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
 EOF
@@ -45,7 +48,7 @@ function _zsh_git_sweep_all_usage() {
   cat <<'EOF'
 Usage: gitsweep-all [options]
 
-Delete every local and remote branch except the primary branch.
+Delete every local and remote branch except primary and protected branches.
 Run it while the primary branch is checked out.
 
 Options:
@@ -53,6 +56,7 @@ Options:
   -b, --base <ref>       Keep this base ref as the primary branch.
   -f, --force            Also remove unmerged local branches and dirty worktrees.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
 EOF
@@ -124,18 +128,66 @@ function _zsh_git_sweep_default_remote_base() {
 function _zsh_git_sweep_branch_name_from_ref() {
   local ref=$1
   local remote=${2:-}
-  local branch=$ref
+  local full_ref
+  full_ref=$(git rev-parse --symbolic-full-name --verify --end-of-options "$ref") || return 1
+  case "$full_ref" in
+    refs/heads/*) print -r -- "${full_ref#refs/heads/}" ;;
+    refs/remotes/*)
+      if [[ -n "$remote" ]]; then
+        [[ "$full_ref" == "refs/remotes/$remote/"* ]] || return 1
+        print -r -- "${full_ref#refs/remotes/$remote/}"
+      else
+        # Remote names can themselves contain slashes. Use the longest matching
+        # configured namespace so release/v1 is never mistaken for v1.
+        local candidate matched_remote=""
+        while IFS= read -r candidate; do
+          if [[ "$full_ref" == "refs/remotes/$candidate/"* ]] &&
+              (( ${#candidate} > ${#matched_remote} )); then
+            matched_remote=$candidate
+          fi
+        done < <(git remote)
+        [[ -n "$matched_remote" ]] || return 1
+        print -r -- "${full_ref#refs/remotes/$matched_remote/}"
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
 
-  branch=${branch#refs/heads/}
-  branch=${branch#refs/remotes/}
-
-  if [[ -n "$remote" ]]; then
-    branch=${branch#${remote}/}
-  elif [[ "$branch" == */* ]]; then
-    branch=${branch#*/}
+# The calling command owns protect_patterns (zsh's dynamic local scope).
+# CLI and Git configuration are additive; --force never overrides protection.
+function _zsh_git_sweep_load_protection() {
+  local configured pattern result=0
+  configured=$(git config --null --get-all gitsweep.protect) || result=$?
+  if (( result > 1 )); then
+    echo "❌ Could not read gitsweep.protect configuration."
+    return 2
   fi
+  if (( result == 0 )); then
+    while IFS= read -r -d '' pattern; do
+      protect_patterns+=("$pattern")
+    done < <(printf '%s' "$configured")
+  fi
+  for pattern in "${protect_patterns[@]}"; do
+    result=0
+    ( [[ "" == ${~pattern} ]] ) 2>/dev/null || result=$?
+    if [[ -z "$pattern" ]] || (( result > 1 )); then
+      print -r -- "🚨 Invalid protection pattern: $pattern"
+      return 2
+    fi
+  done
+  if (( ${#protect_patterns} > 0 )); then
+    print -r -- "🛡️  Protected patterns: ${(j:, :)protect_patterns}"
+  fi
+  return 0
+}
 
-  echo "$branch"
+function _zsh_git_sweep_matches_protection() {
+  local branch=$1 pattern
+  for pattern in "${protect_patterns[@]}"; do
+    [[ "$branch" == ${~pattern} ]] && return 0
+  done
+  return 1
 }
 
 function _zsh_git_sweep_is_protected_branch() {
@@ -152,22 +204,32 @@ function _zsh_git_sweep_is_protected_branch() {
   return 1
 }
 
-# Prints the branch names on a remote, skipping its HEAD symref and the primary branch.
+# Prints branch names and scanned object IDs, skipping symbolic and protected refs.
 function _zsh_git_sweep_remote_branches() {
   local remote=$1
   local primary_branch=$2
+  local merged_base=${3:-}
+  local -a filters
+  [[ -n "$merged_base" ]] && filters+=("--merged=$merged_base")
 
-  local ref symref branch
-  while IFS=$'\t' read -r ref symref; do
+  local ref oid symref branch
+  while IFS=$'\t' read -r ref oid symref; do
     [[ -z "$ref" ]] && continue
     [[ -n "$symref" ]] && continue
 
     branch=${ref#refs/remotes/${remote}/}
     [[ "$branch" == "HEAD" ]] && continue
     [[ "$branch" == "$primary_branch" ]] && continue
+    _zsh_git_sweep_matches_protection "$branch" && continue
 
-    echo "$branch"
-  done < <(git for-each-ref --format='%(refname)%09%(symref)' "refs/remotes/$remote")
+    printf '%s\t%s\n' "$branch" "$oid"
+  done < <(git for-each-ref "${filters[@]}" --format='%(refname)%09%(objectname)%09%(symref)' "refs/remotes/$remote/")
+}
+
+function _zsh_git_sweep_delete_remote_branch() {
+  local remote=$1 branch=$2 expected_oid=$3
+  # An explicit lease also protects against background fetches after the scan.
+  git push --force-with-lease="refs/heads/$branch:$expected_oid" -- "$remote" ":refs/heads/$branch"
 }
 
 # Removes a local branch and the worktree that has it checked out, if any.
@@ -178,23 +240,43 @@ function _zsh_git_sweep_remove_local_branch() {
   local dry_run=$3
   local force_hint=$4
 
-  local worktree_path
-  worktree_path=$(git worktree list --porcelain | awk -v br="$branch" '
-    /^worktree / {
-      path = $0
-      sub(/^worktree /, "", path)
-    }
-    /^branch refs\/heads\// {
-      sub(/^branch refs\/heads\//, "")
-      if ($0 == br && path != "") { print path; exit }
-    }
-  ')
+  local worktree_path="" record record_path="" record_branch="" locked=0
+  local worktree_listing
+  if ! worktree_listing=$(git worktree list --porcelain -z); then
+    echo "   ⚠️  Could not list worktrees (Git 2.36+ required); skipping branch."
+    return 1
+  fi
+  while IFS= read -r -d '' record; do
+    case "$record" in
+      'worktree '*) record_path=${record#worktree } ;;
+      'branch '*) record_branch=${record#branch refs/heads/} ;;
+      locked|locked\ *) locked=1 ;;
+      '')
+        if [[ "$record_branch" == "$branch" ]]; then
+          worktree_path=$record_path
+          break
+        fi
+        record_path="" record_branch="" locked=0
+        ;;
+    esac
+  done < <(printf '%s' "$worktree_listing")
 
   if [[ -n "$worktree_path" ]]; then
-    if (( ! force )) && [[ -n "$(git -C "$worktree_path" status --porcelain)" ]]; then
-      echo "   ⚠️  Worktree has local changes; skipping branch."
-      echo "      Use $force_hint to remove it anyway."
+    if (( locked )); then
+      echo "   ⚠️  Worktree is locked; skipping branch."
       return 1
+    fi
+    if (( ! force )); then
+      local worktree_status
+      if ! worktree_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree_path" status --porcelain --untracked-files=all --ignore-submodules=none); then
+        echo "   ⚠️  Could not inspect worktree; skipping branch."
+        return 1
+      fi
+      if [[ -n "$worktree_status" ]]; then
+        echo "   ⚠️  Worktree has local changes; skipping branch."
+        echo "      Use $force_hint to remove it anyway."
+        return 1
+      fi
     fi
 
     if (( dry_run )); then
@@ -237,6 +319,7 @@ function _zsh_git_sweep_remote_sweep() {
   local usage_func=$2
   shift 2
 
+  local -a protect_patterns
   local base_ref=""
   local dry_run=0
   local fetch=1
@@ -262,6 +345,14 @@ function _zsh_git_sweep_remote_sweep() {
         base_ref=$2
         shift
         ;;
+      --protect)
+        if (( $# < 2 )) || [[ -z "$2" || "$2" == -* ]]; then
+          echo "🚨 Missing value for --protect"
+          return 2
+        fi
+        protect_patterns+=("$2")
+        shift
+        ;;
       -n|--dry-run)
         dry_run=1
         ;;
@@ -285,6 +376,8 @@ function _zsh_git_sweep_remote_sweep() {
     echo "🚨 Not a Git repository."
     return 1
   fi
+
+  _zsh_git_sweep_load_protection || return $?
 
   if [[ -z "$remote" ]]; then
     if ! remote=$(_zsh_git_sweep_default_remote); then
@@ -328,36 +421,38 @@ function _zsh_git_sweep_remote_sweep() {
     fi
   fi
 
-  if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+  if ! git rev-parse --verify --quiet --end-of-options "$base_ref^{commit}" >/dev/null; then
     echo "❌ Base ref not found: $base_ref"
     return 1
   fi
 
   local base_branch
-  base_branch=$(_zsh_git_sweep_branch_name_from_ref "$base_ref" "$remote")
+  if ! base_branch=$(_zsh_git_sweep_branch_name_from_ref "$base_ref" "$remote") ||
+      ! git show-ref --verify --quiet "refs/remotes/$remote/$base_branch"; then
+    echo "❌ Base must identify a branch on $remote: $base_ref"
+    return 1
+  fi
 
   echo "🧭 Using remote: $remote"
   echo "🧭 Using primary/base ref: $base_ref"
 
   local -a candidates
-  local -A candidate_reasons
-  local branch reason
-  while IFS= read -r branch; do
+  local -A candidate_reasons candidate_oids
+  local branch reason oid merged_base=""
+  [[ "$mode" == "merged" ]] && merged_base=$base_ref
+  while IFS=$'\t' read -r branch oid; do
     [[ -z "$branch" ]] && continue
 
     if [[ "$mode" == "merged" ]]; then
-      if git merge-base --is-ancestor "refs/remotes/$remote/$branch" "$base_ref"; then
-        reason="merged into $base_ref"
-      else
-        continue
-      fi
+      reason="merged into $base_ref"
     else
       reason="not primary branch"
     fi
 
     candidates+=("$branch")
     candidate_reasons[$branch]=$reason
-  done < <(_zsh_git_sweep_remote_branches "$remote" "$base_branch")
+    candidate_oids[$branch]=$oid
+  done < <(_zsh_git_sweep_remote_branches "$remote" "$base_branch" "$merged_base")
 
   if (( ${#candidates} == 0 )); then
     echo "✨ All clean! No remote branch candidates found."
@@ -366,7 +461,7 @@ function _zsh_git_sweep_remote_sweep() {
 
   echo "🗑️  Found ${#candidates} remote branch(es) to delete: ${(j:, :)candidates}"
 
-  local deleted_count=0
+  local deleted_count=0 failed_count=0
   for branch in "${candidates[@]}"; do
     echo "🔍 Checking remote branch: $remote/$branch (${candidate_reasons[$branch]})"
 
@@ -376,10 +471,11 @@ function _zsh_git_sweep_remote_sweep() {
     fi
 
     echo "   🗑️  Deleting remote branch: $remote/$branch"
-    if git push "$remote" --delete "$branch"; then
+    if _zsh_git_sweep_delete_remote_branch "$remote" "$branch" "${candidate_oids[$branch]}"; then
       deleted_count=$(( deleted_count + 1 ))
     else
-      echo "   ⚠️  Could not delete remote branch: $remote/$branch."
+      echo "   ⚠️  Could not delete remote branch: $remote/$branch (changed or rejected)."
+      failed_count=$(( failed_count + 1 ))
     fi
   done
 
@@ -395,12 +491,17 @@ function _zsh_git_sweep_remote_sweep() {
     fi
   fi
 
+  if (( failed_count > 0 )); then
+    echo "❌ Remote git sweep incomplete. $failed_count branch(es) left behind."
+    return 1
+  fi
   echo "✅ Remote git sweep complete!"
 }
 
 function gitsweep() {
   emulate -L zsh
 
+  local -a protect_patterns
   local base_ref=""
   local dry_run=0
   local force=0
@@ -420,6 +521,14 @@ function gitsweep() {
         ;;
       -f|--force)
         force=1
+        ;;
+      --protect)
+        if (( $# < 2 )) || [[ -z "$2" || "$2" == -* ]]; then
+          echo "🚨 Missing value for --protect"
+          return 2
+        fi
+        protect_patterns+=("$2")
+        shift
         ;;
       -n|--dry-run)
         dry_run=1
@@ -461,6 +570,8 @@ function gitsweep() {
     return 1
   fi
 
+  _zsh_git_sweep_load_protection || return $?
+
   echo "🧹 Starting git sweep..."
   if (( dry_run )); then
     echo "🔎 Dry run mode: no branches, worktrees, or Git refs will be changed."
@@ -501,7 +612,7 @@ function gitsweep() {
     fi
   fi
 
-  if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+  if ! git rev-parse --verify --quiet --end-of-options "$base_ref^{commit}" >/dev/null; then
     echo "❌ Base ref not found: $base_ref"
     return 1
   fi
@@ -510,14 +621,11 @@ function gitsweep() {
 
   local branch upstream track
   local current_branch
-  current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
+  current_branch=$(git symbolic-ref --quiet HEAD 2>/dev/null)
+  current_branch=${current_branch#refs/heads/}
 
-  local base_branch=$base_ref
-  base_branch=${base_branch#refs/heads/}
-  base_branch=${base_branch#refs/remotes/}
-  if [[ "$base_branch" == */* && "$base_ref" != refs/heads/* ]]; then
-    base_branch=${base_branch#*/}
-  fi
+  local base_branch
+  base_branch=$(_zsh_git_sweep_branch_name_from_ref "$base_ref") || base_branch=""
 
   local -a protected_branches
   protected_branches=(main master trunk develop dev "$base_branch")
@@ -529,6 +637,7 @@ function gitsweep() {
   while IFS=$'\t' read -r branch upstream track; do
     [[ "$branch" == "$current_branch" ]] && continue
     _zsh_git_sweep_is_protected_branch "$branch" "${protected_branches[@]}" && continue
+    _zsh_git_sweep_matches_protection "$branch" && continue
 
     if [[ "$track" == "[gone]" ]] || (( dry_run && ${+dry_run_pruned_refs[$upstream]} )); then
       reason="upstream gone"
@@ -539,24 +648,23 @@ function gitsweep() {
         candidate_reasons[$branch]="${candidate_reasons[$branch]}, $reason"
       fi
     fi
-  done < <(git for-each-ref --format='%(refname:short)%09%(upstream:short)%09%(upstream:track)' refs/heads)
+  done < <(git for-each-ref --format='%(refname:lstrip=2)%09%(upstream:short)%09%(upstream:track)' refs/heads)
 
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
     [[ "$branch" == "$current_branch" ]] && continue
     _zsh_git_sweep_is_protected_branch "$branch" "${protected_branches[@]}" && continue
+    _zsh_git_sweep_matches_protection "$branch" && continue
 
-    if git merge-base --is-ancestor "refs/heads/$branch" "$base_ref"; then
-      reason="merged into $base_ref"
-      merged_candidates[$branch]=1
-      if (( ! ${+candidate_reasons[$branch]} )); then
-        candidates+=("$branch")
-        candidate_reasons[$branch]=$reason
-      else
-        candidate_reasons[$branch]="${candidate_reasons[$branch]}, $reason"
-      fi
+    reason="merged into $base_ref"
+    merged_candidates[$branch]=1
+    if (( ! ${+candidate_reasons[$branch]} )); then
+      candidates+=("$branch")
+      candidate_reasons[$branch]=$reason
+    else
+      candidate_reasons[$branch]="${candidate_reasons[$branch]}, $reason"
     fi
-  done < <(git for-each-ref --format='%(refname:short)' refs/heads)
+  done < <(git for-each-ref --merged="$base_ref" --format='%(refname:lstrip=2)' refs/heads)
 
   if [[ -n "$stale_days" ]]; then
     local now stale_seconds commit_ts
@@ -567,6 +675,7 @@ function gitsweep() {
       [[ -z "$branch" ]] && continue
       [[ "$branch" == "$current_branch" ]] && continue
       _zsh_git_sweep_is_protected_branch "$branch" "${protected_branches[@]}" && continue
+      _zsh_git_sweep_matches_protection "$branch" && continue
 
       if (( now - commit_ts >= stale_seconds )); then
         reason="older than ${stale_days}d"
@@ -578,7 +687,7 @@ function gitsweep() {
           candidate_reasons[$branch]="${candidate_reasons[$branch]}, $reason"
         fi
       fi
-    done < <(git for-each-ref --format='%(refname:short)%09%(committerdate:unix)' refs/heads)
+    done < <(git for-each-ref --format='%(refname:lstrip=2)%09%(committerdate:unix)' refs/heads)
   fi
 
   if (( ${#candidates} == 0 )); then
@@ -637,6 +746,7 @@ function gitsweep-remote-all() {
 function gitsweep-all() {
   emulate -L zsh
 
+  local -a protect_patterns
   local base_ref=""
   local dry_run=0
   local force=0
@@ -666,6 +776,14 @@ function gitsweep-all() {
       -f|--force)
         force=1
         ;;
+      --protect)
+        if (( $# < 2 )) || [[ -z "$2" || "$2" == -* ]]; then
+          echo "🚨 Missing value for --protect"
+          return 2
+        fi
+        protect_patterns+=("$2")
+        shift
+        ;;
       -n|--dry-run)
         dry_run=1
         ;;
@@ -689,6 +807,8 @@ function gitsweep-all() {
     echo "🚨 Not a Git repository."
     return 1
   fi
+
+  _zsh_git_sweep_load_protection || return $?
 
   if [[ -z "$remote" ]]; then
     if ! remote=$(_zsh_git_sweep_default_remote); then
@@ -732,20 +852,25 @@ function gitsweep-all() {
     fi
   fi
 
-  if ! git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null; then
+  if ! git rev-parse --verify --quiet --end-of-options "$base_ref^{commit}" >/dev/null; then
     echo "❌ Base ref not found: $base_ref"
     return 1
   fi
 
   local base_branch
-  base_branch=$(_zsh_git_sweep_branch_name_from_ref "$base_ref" "$remote")
+  if ! base_branch=$(_zsh_git_sweep_branch_name_from_ref "$base_ref" "$remote") ||
+      ! git show-ref --verify --quiet "refs/remotes/$remote/$base_branch"; then
+    echo "❌ Base must identify a branch on $remote: $base_ref"
+    return 1
+  fi
 
   echo "🧭 Using remote: $remote"
   echo "🧭 Using primary/base ref: $base_ref"
 
   # Everything except the primary branch is deleted, so require it to be checked out.
   local current_branch
-  current_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null)
+  current_branch=$(git symbolic-ref --quiet HEAD 2>/dev/null)
+  current_branch=${current_branch#refs/heads/}
   if [[ "$current_branch" != "$base_branch" ]]; then
     echo "🚨 gitsweep-all must run from the primary branch: $base_branch"
     if [[ -n "$current_branch" ]]; then
@@ -758,18 +883,22 @@ function gitsweep-all() {
   fi
 
   local -a remote_candidates local_candidates left_behind
-  local branch
-  while IFS= read -r branch; do
-    [[ -n "$branch" ]] && remote_candidates+=("$branch")
+  local -A candidate_oids
+  local branch oid
+  while IFS=$'\t' read -r branch oid; do
+    [[ -z "$branch" ]] && continue
+    remote_candidates+=("$branch")
+    candidate_oids[$branch]=$oid
   done < <(_zsh_git_sweep_remote_branches "$remote" "$base_branch")
 
   while IFS= read -r branch; do
     [[ -z "$branch" || "$branch" == "$base_branch" ]] && continue
+    _zsh_git_sweep_matches_protection "$branch" && continue
     local_candidates+=("$branch")
   done < <(git for-each-ref --format='%(refname:lstrip=2)' refs/heads)
 
   if (( ${#remote_candidates} == 0 && ${#local_candidates} == 0 )); then
-    echo "✨ All clean! Only $base_branch remains locally and on $remote."
+    echo "✨ All clean! Only $base_branch and protected branches remain locally and on $remote."
     return 0
   fi
 
@@ -798,7 +927,7 @@ function gitsweep-all() {
     fi
 
     echo "   🗑️  Deleting remote branch: $remote/$branch"
-    if git push "$remote" --delete "$branch"; then
+    if _zsh_git_sweep_delete_remote_branch "$remote" "$branch" "${candidate_oids[$branch]}"; then
       remote_deleted_count=$(( remote_deleted_count + 1 ))
     else
       echo "   ⚠️  Could not delete remote branch: $remote/$branch."
@@ -845,7 +974,7 @@ function gitsweep-all() {
     return 1
   fi
 
-  echo "✅ Full git sweep complete! Only $base_branch remains locally and on $remote."
+  echo "✅ Full git sweep complete! Only $base_branch and protected branches remain locally and on $remote."
 }
 
 # Optional alias.
