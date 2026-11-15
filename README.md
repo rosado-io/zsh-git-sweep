@@ -36,9 +36,10 @@ By default, `gitsweep` is intentionally conservative:
   that you explicitly include with `--stale-days`.
 - It skips the branch you are currently on.
 - It skips protected branch names such as `main`, `master`, `trunk`, `develop`,
-  and `dev`.
+  and `dev`, plus names matching `--protect` or `gitsweep.protect` patterns.
 - It removes worktrees without `--force`, so dirty worktrees are preserved.
 - It only deletes branches that are already merged into the base branch.
+- Locked worktrees are always preserved, including with `--force`.
 
 Use `gitsweep --force` only after reviewing the branch/worktree. Force mode runs
 `git worktree remove -f` and `git branch -D`, which can delete local worktree
@@ -54,27 +55,37 @@ remote repository with `git push <remote> --delete <branch>`:
 - `gitsweep-remote-merged` deletes remote branches that are already merged into
   the selected base ref.
 - `gitsweep-remote-all` deletes every branch from the selected remote except the
-  primary/base branch.
+  primary/base branch and explicitly protected branches.
 
 For remote cleanup, the default remote is `origin` when available, otherwise the
 first configured remote. The primary branch is detected from `<remote>/HEAD`,
 then common branch names such as `<remote>/main` and `<remote>/master`. Use
-`--remote` and `--base` to choose explicitly.
+`--remote` and `--base` to choose explicitly. For remote commands, `--base` must
+identify a local or remote-tracking branch with a corresponding branch on the
+selected remote; tags and raw commit IDs are rejected.
+
+Remote deletion uses an explicit `--force-with-lease` tied to the commit seen
+during the scan. If someone pushes new commits before deletion, the command
+preserves that branch and exits nonzero. This check also applies with
+`--no-fetch` and `--force`. Server-rejected deletions also exit nonzero.
 
 `gitsweep-all` is the deliberate "keep only the primary branch" reset. It is the
 most destructive command in this plugin:
 
-- It deletes every branch on the selected remote except the primary branch,
+- It deletes every branch on the selected remote except the primary and
+  explicitly protected branches,
   including remote branches other people may be using.
-- It deletes every local branch except the primary branch, including names such
+- It deletes every local branch except the primary and explicitly protected
+  branches, including names such
   as `develop` that `gitsweep` normally protects, and removes their worktrees.
 - It refuses to run unless the primary branch is checked out, so the current
   branch is never left behind by accident.
 - Without `--force`, it skips local branches that are not merged into the
   primary branch and worktrees with local changes. With `--force`, those
   unmerged commits and local changes are deleted.
-- It lists everything it could not delete and exits nonzero when anything is
-  left behind.
+- It lists everything it could not delete and exits nonzero when a deletion
+  fails or an unprotected candidate is left behind. Intentionally protected
+  branches do not count as failures.
 
 If you are running it in a repository you care about, start with:
 
@@ -91,7 +102,7 @@ worktrees, or Git refs.
 ## Requirements
 
 - zsh
-- Git
+- Git 2.36 or newer (for unambiguous worktree path parsing)
 - Oh My Zsh, if you want to load it as an Oh My Zsh plugin
 
 ## Installation
@@ -193,6 +204,7 @@ Options:
   -b, --base <ref>       Compare merged branches against this base ref.
   -f, --force            Remove unmerged/stale candidates too.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p before scanning.
       --stale-days <n>   Include branches older than n days as candidates.
   -h, --help             Show this help message.
@@ -205,6 +217,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Compare merged remote branches against this base ref.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
 ```
@@ -216,6 +229,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Keep this base ref as the primary branch.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
 ```
@@ -223,7 +237,7 @@ Options:
 ```text
 Usage: gitsweep-all [options]
 
-Delete every local and remote branch except the primary branch.
+Delete every local and remote branch except primary and protected branches.
 Run it while the primary branch is checked out.
 
 Options:
@@ -231,8 +245,41 @@ Options:
   -b, --base <ref>       Keep this base ref as the primary branch.
   -f, --force            Also remove unmerged local branches and dirty worktrees.
   -n, --dry-run          Show what would be removed without changing anything.
+      --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
+```
+
+### Protect Long-Lived Branches
+
+All four commands accept repeatable `--protect` patterns. Quote patterns so zsh
+does not expand them to filenames before the command runs:
+
+```zsh
+gitsweep --protect 'release/*' --protect staging --dry-run
+gitsweep-all --protect 'release/*' --protect develop --dry-run
+```
+
+Save repository-specific defaults with Git configuration:
+
+```zsh
+git config --local --add gitsweep.protect 'release/*'
+git config --local --add gitsweep.protect staging
+```
+
+Use `--global` instead of `--local` for personal defaults across repositories.
+CLI patterns add to all configured patterns; they do not replace them. Patterns
+match the entire branch name, such as `release/v1`, without the remote prefix
+(`origin/`). Standard zsh patterns such as `*`, `?`, and `[ab]` are supported;
+`*` also matches `/`. Matching is case-sensitive. Invalid or empty patterns stop
+the command before fetching or deleting anything.
+
+Protection keeps both the branch and its worktree, including uncommitted files.
+It applies to local and remote cleanup and cannot be bypassed by `--force`.
+Remove a saved rule explicitly when you no longer need it:
+
+```zsh
+git config --local --fixed-value --unset-all gitsweep.protect 'release/*'
 ```
 
 ### Common Workflows
@@ -382,13 +429,15 @@ With `--force`, local worktree changes can be deleted.
 
 ### What does `gitsweep-remote-all` keep?
 
-It keeps the primary/base branch only. By default that is detected from
-`<remote>/HEAD`; pass `--base <ref>` if you want to preserve a specific branch.
+It keeps the primary/base branch and any branches matching protection patterns.
+By default the primary branch is detected from `<remote>/HEAD`; pass
+`--base <ref>` to choose another branch, or `--protect` to preserve additional
+branches.
 
 ### How is `gitsweep-all` different from running the other commands?
 
 `gitsweep-all` combines `gitsweep-remote-all` with a local sweep of every
-non-primary branch, not only merged, gone, or stale ones. It previews both
+non-primary, unprotected branch, not only merged, gone, or stale ones. It previews both
 sides in one `--dry-run`, requires the primary branch to be checked out, and
 exits nonzero if any local or remote branch is left behind.
 
@@ -400,8 +449,11 @@ Run the local test script from the repository root:
 zsh tests/gitsweep.zsh
 ```
 
-The tests create temporary Git repositories and verify the safe default behavior
-and explicit force behavior.
+The tests create isolated temporary Git repositories and verify safe defaults,
+explicit force behavior, protection rules, unusual worktree paths, and remote
+updates arriving during cleanup. Fixtures are removed when the suite exits.
+CI runs the suite on Linux and macOS. GitHub Actions dependencies are pinned to
+commit hashes and checked weekly by Dependabot.
 
 ## Contributing
 

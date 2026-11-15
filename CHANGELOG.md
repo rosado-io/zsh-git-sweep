@@ -8,12 +8,42 @@ for tagged releases.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-14
+
 ### Added
 
+- Repeatable `--protect <glob>` on all four commands and persistent
+  `gitsweep.protect` Git configuration. Protection is additive, preserves matching
+  branches and worktrees, and is honored even with `--force`.
+- Weekly Dependabot updates for GitHub Actions dependencies.
 - `gitsweep-all` (alias `gsweep-a`) to delete every non-primary local and
   remote branch in one command, with a combined dry run, a primary-branch
   check, a `--force` gate for unmerged or dirty local work, and a nonzero exit
   when anything is left behind.
+
+### Changed
+
+- Scan merged local and remote branches with one Git ancestry query per namespace
+  instead of starting `git merge-base` for each branch in those scans.
+- Require Git 2.36 or newer to parse worktree paths with NUL-delimited output.
+- Update `actions/checkout` from v4 to v7.0.1, pinned to its full commit SHA,
+  disable persisted checkout credentials, and add a CI timeout and syntax checks.
+- Remote commands now require `--base` to identify a branch on the selected
+  remote; tags and raw commit IDs cannot safely identify a branch to keep.
+
+### Fixed
+
+- Guard remote deletions with explicit commit leases so concurrent pushes and
+  stale tracking refs cannot cause unseen commits to be deleted.
+- Return nonzero from remote-only sweeps when a branch deletion fails.
+- Use fully qualified remote deletion refs to avoid collisions with tag names.
+- Preserve local base branches whose names contain slashes.
+- Parse worktree paths containing spaces, quotes, backslashes, tabs, Unicode,
+  and newlines without invoking `awk` for each candidate.
+- Honor worktree locks in previews, fail closed when worktree status cannot be
+  read, and inspect untracked files and submodules regardless of status settings.
+- Remove all temporary test repositories on exit and isolate tests from global
+  and system Git configuration.
 
 ## [0.2.1] - 2026-07-08
 
