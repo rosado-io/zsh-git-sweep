@@ -6,7 +6,7 @@ The main safety goal is to avoid surprising or implicit destructive behavior.
 
 ## Supported Versions
 
-The latest tagged release (currently `v0.3.0`) and the latest commit on `main`
+The latest tagged release (currently `v0.4.0`) and the latest commit on `main`
 are supported. Upgrade older releases to receive security and safety fixes.
 
 ## Reporting a Vulnerability

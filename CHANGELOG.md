@@ -8,6 +8,25 @@ for tagged releases.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
+### Added
+
+- `--interactive` (`-i`) on all four commands, with a numbered candidate menu,
+  independent local/remote selection, branch/worktree pairs, and a final explicit
+  confirmation. Empty input cancels; dry runs preview only the chosen entries.
+- Terminal integration coverage using zsh's bundled `zsh/zpty` module.
+
+### Safety
+
+- Interactive selection honors protected branches and worktree locks, excludes
+  unsafe local candidates unless `--force` is explicit, and rejects nonterminal
+  input/output before fetching.
+- Recheck local branch tips, worktree paths and safety conditions after user
+  input, reload configured protection, and retain original remote deletion leases.
+- Skip global worktree pruning and the follow-up remote fetch/prune for
+  interactive cleanup; deliberately unselected candidates are kept without error.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added
