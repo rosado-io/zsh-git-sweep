@@ -204,6 +204,7 @@ Options:
   -b, --base <ref>       Compare merged branches against this base ref.
   -f, --force            Remove unmerged/stale candidates too.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p before scanning.
       --stale-days <n>   Include branches older than n days as candidates.
@@ -217,6 +218,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Compare merged remote branches against this base ref.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
@@ -229,6 +231,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Keep this base ref as the primary branch.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
@@ -245,10 +248,53 @@ Options:
   -b, --base <ref>       Keep this base ref as the primary branch.
   -f, --force            Also remove unmerged local branches and dirty worktrees.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
 ```
+
+### Choose What to Clean Interactively
+
+Use `--interactive` (or `-i`) to choose candidates in your terminal:
+
+```zsh
+gitsweep --interactive
+gitsweep --interactive --protect 'release/*'
+gitsweep-all --interactive --dry-run
+gitsweep-remote-merged -i
+```
+
+The numbered menu shows each eligible local branch and its worktree path, if
+present. A local entry removes the branch **and** its linked worktree together;
+it does not remove detached worktrees or offer worktree-only deletion. Remote
+branches are separate entries, so `gitsweep-all -i` lets you keep a local copy
+while deleting the remote copy, or vice versa.
+
+Enter numbers separated by spaces or commas (for example `1 3` or `1,3`), or
+`all`. Repeated numbers are counted once. Review the selected entries, then type
+`yes` at the final confirmation to delete them. Enter or `q` at the selection
+prompt cancels; anything other than `yes` at confirmation cancels too. EOF or
+Ctrl-C while choosing stops without deleting selected branches or worktrees.
+Nothing is deleted until the complete selection is confirmed.
+
+With `--dry-run`, the menu previews only your selection, without a deletion
+confirmation or any mutations. Interactive mode requires terminal input and
+output; piped input and redirected output are rejected before fetching. The
+normal fetch/prune still runs **before** the menu unless you use `--no-fetch` or
+`--dry-run`; cancelling does not undo those tracking-ref updates. Interactive
+cleanup skips the final global worktree prune and follow-up fetch/prune so that
+unselected worktree metadata is left alone.
+
+Protection rules and the current/base branch safeguards still apply. Locked or
+uninspectable worktrees are skipped. Unmerged branches and dirty worktrees are
+not offered without `--force`; force selections are explicitly marked and still
+require confirmation. `--force` never overrides protection rules or locks.
+Before deleting, the command reloads protection rules and rechecks selected
+local branch tips, worktree paths, merge status and local changes. Branches or
+worktrees that changed in an unsafe way while you chose are preserved, and the
+command returns nonzero. Remote deletion keeps the original commit lease.
+Intentionally unselected branches do not count as failures.
 
 ### Protect Long-Lived Branches
 
@@ -451,7 +497,9 @@ zsh tests/gitsweep.zsh
 
 The tests create isolated temporary Git repositories and verify safe defaults,
 explicit force behavior, protection rules, unusual worktree paths, and remote
-updates arriving during cleanup. Fixtures are removed when the suite exits.
+updates arriving during cleanup. Terminal integration tests use the bundled
+`zsh/zpty` module to exercise selection, cancellation and changes during prompts.
+Fixtures are removed when the suite exits.
 CI runs the suite on Linux and macOS. GitHub Actions dependencies are pinned to
 commit hashes and checked weekly by Dependabot.
 

@@ -54,5 +54,11 @@ Use Git 2.36 or newer. Add safety regression cases in `tests/regressions.zsh`;
 the main test script sources it and supplies isolated fixtures and assertions.
 Do not use the project's actual remote or worktrees as deletion test fixtures.
 
+Interactive commands must collect the entire selection and explicit confirmation
+before deleting anything. No selection is the default. Do not turn a rejected or
+interrupted selection into a full sweep. Recheck safety after user input and keep
+unselected candidates without reporting them as failures. Terminal integration
+cases live in `tests/interactive.zsh` and use zsh's bundled `zsh/zpty` module.
+
 Changes that expand deletion behavior should be reviewed carefully and covered
 by tests.

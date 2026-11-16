@@ -9,6 +9,7 @@ Options:
   -b, --base <ref>       Compare merged branches against this base ref.
   -f, --force            Remove unmerged/stale candidates too.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p before scanning.
       --stale-days <n>   Include branches older than n days as candidates.
@@ -24,6 +25,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Compare merged remote branches against this base ref.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
@@ -38,6 +40,7 @@ Options:
   -r, --remote <name>    Delete branches from this remote.
   -b, --base <ref>       Keep this base ref as the primary branch.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
@@ -56,6 +59,7 @@ Options:
   -b, --base <ref>       Keep this base ref as the primary branch.
   -f, --force            Also remove unmerged local branches and dirty worktrees.
   -n, --dry-run          Show what would be removed without changing anything.
+  -i, --interactive      Select candidates in a terminal before cleanup.
       --protect <glob>  Keep matching branch names (repeatable; also Git config).
       --no-fetch         Skip git fetch -p <remote> before scanning.
   -h, --help             Show this help message.
@@ -232,15 +236,11 @@ function _zsh_git_sweep_delete_remote_branch() {
   git push --force-with-lease="refs/heads/$branch:$expected_oid" -- "$remote" ":refs/heads/$branch"
 }
 
-# Removes a local branch and the worktree that has it checked out, if any.
-# Returns nonzero when the branch is left in place.
-function _zsh_git_sweep_remove_local_branch() {
-  local branch=$1
-  local force=$2
-  local dry_run=$3
-  local force_hint=$4
-
-  local worktree_path="" record record_path="" record_branch="" locked=0
+# Inspects the branch's worktree without mutation. The caller owns worktree_path.
+function _zsh_git_sweep_inspect_worktree() {
+  local branch=$1 force=$2 force_hint=$3
+  worktree_path=""
+  local record record_path="" record_branch="" locked=0
   local worktree_listing
   if ! worktree_listing=$(git worktree list --porcelain -z); then
     echo "   ⚠️  Could not list worktrees (Git 2.36+ required); skipping branch."
@@ -266,19 +266,27 @@ function _zsh_git_sweep_remove_local_branch() {
       echo "   ⚠️  Worktree is locked; skipping branch."
       return 1
     fi
-    if (( ! force )); then
-      local worktree_status
-      if ! worktree_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree_path" status --porcelain --untracked-files=all --ignore-submodules=none); then
-        echo "   ⚠️  Could not inspect worktree; skipping branch."
-        return 1
-      fi
-      if [[ -n "$worktree_status" ]]; then
-        echo "   ⚠️  Worktree has local changes; skipping branch."
-        echo "      Use $force_hint to remove it anyway."
-        return 1
-      fi
+    local worktree_status
+    if ! worktree_status=$(GIT_OPTIONAL_LOCKS=0 git -C "$worktree_path" status --porcelain --untracked-files=all --ignore-submodules=none); then
+      echo "   ⚠️  Could not inspect worktree; skipping branch."
+      return 1
     fi
+    if (( ! force )) && [[ -n "$worktree_status" ]]; then
+      echo "   ⚠️  Worktree has local changes; skipping branch."
+      echo "      Use $force_hint to remove it anyway."
+      return 1
+    fi
+  fi
+  return 0
+}
 
+# Removes a local branch and its worktree; returns nonzero when it is left in place.
+function _zsh_git_sweep_remove_local_branch() {
+  local branch=$1 force=$2 dry_run=$3 force_hint=$4
+  local worktree_path=""
+  _zsh_git_sweep_inspect_worktree "$branch" "$force" "$force_hint" || return 1
+
+  if [[ -n "$worktree_path" ]]; then
     if (( dry_run )); then
       echo "   📦 Would remove worktree at $worktree_path"
     else
@@ -312,6 +320,128 @@ function _zsh_git_sweep_remove_local_branch() {
   fi
 }
 
+# The command owns local_choices, remote_choices, selected_local, selected_remote,
+# interactive_oids and interactive_paths. Selection is collected before deletion.
+function _zsh_git_sweep_choose() {
+  local base_ref=$1 force=$2 dry_run=$3 remote=$4
+  local IFS=$' \t\n'
+  local -a labels kinds branches indexes
+  local -A seen
+  local branch oid worktree_path="" label item answer token count number valid
+
+  for branch in "${local_choices[@]}"; do
+    if ! oid=$(git rev-parse --verify --quiet "refs/heads/$branch"); then
+      print -r -- "   Skipping missing local branch: ${(q)branch}"
+      continue
+    fi
+    if (( ! force )) && ! git merge-base --is-ancestor "$oid" "$base_ref"; then
+      print -r -- "   Skipping local branch ${(q)branch}: not merged into $base_ref."
+      continue
+    fi
+    print -r -- "🔍 Inspecting local branch: ${(q)branch}"
+    _zsh_git_sweep_inspect_worktree "$branch" "$force" "--force" || continue
+    label="local ${(q)branch}"
+    if [[ -n "$worktree_path" ]]; then
+      label+=" + worktree ${(q)worktree_path}"
+    fi
+    if (( force )); then
+      label+=" [FORCE: unmerged commits and local changes may be lost]"
+    else
+      label+=" [merged into $base_ref]"
+    fi
+    labels+=("$label") kinds+=(local) branches+=("$branch")
+    interactive_oids[$branch]=$oid
+    interactive_paths[$branch]=$worktree_path
+  done
+  for branch in "${remote_choices[@]}"; do
+    labels+=("remote ${(q)remote}/${(q)branch} [delete from remote]")
+    kinds+=(remote) branches+=("$branch")
+  done
+
+  count=${#labels}
+  if (( count == 0 )); then
+    echo "✨ No eligible candidates to select."
+    return 0
+  fi
+  echo "Choose what to clean (local entries include their worktree):"
+  for (( item=1; item<=count; item++ )); do
+    print -r -- "  $item) ${labels[$item]}"
+  done
+
+  while true; do
+    print -n -- "Selection (numbers separated by spaces or commas, all; Enter/q cancels): "
+    if ! IFS= read -r answer; then
+      echo "\nCancelled; no selected branches or worktrees were deleted."
+      return 130
+    fi
+    [[ -z "${answer//[[:space:]]/}" || "$answer" == [qQ] ]] && return 0
+    indexes=() seen=() valid=1
+    if [[ "$answer" == all ]]; then
+      for (( item=1; item<=count; item++ )); do indexes+=("$item"); done
+    else
+      for token in ${=answer//,/ }; do
+        # Validate before arithmetic: no expressions, overflows or option input.
+        if [[ "$token" != <-> || "$token" != [1-9]* ]] || (( ${#token} > ${#count} )); then
+          valid=0
+          break
+        fi
+        number=$(( 10#$token ))
+        if (( number > count )); then
+          valid=0
+          break
+        fi
+        if (( ! ${+seen[$number]} )); then
+          indexes+=("$number")
+          seen[$number]=1
+        fi
+      done
+    fi
+    if (( valid && ${#indexes} > 0 )); then break; fi
+    echo "Invalid selection. Enter listed numbers, all, or q."
+  done
+
+  echo "Selected for cleanup:"
+  for item in "${indexes[@]}"; do print -r -- "  ${labels[$item]}"; done
+  if (( ! dry_run )); then
+    print -n -- "Delete these ${#indexes} selected entries? Type yes to continue [no]: "
+    if ! IFS= read -r answer; then
+      echo "\nCancelled; no selected branches or worktrees were deleted."
+      return 130
+    fi
+    [[ "$answer" == yes ]] || return 0
+  fi
+  for item in "${indexes[@]}"; do
+    if [[ "${kinds[$item]}" == local ]]; then
+      selected_local+=("${branches[$item]}")
+    else
+      selected_remote+=("${branches[$item]}")
+    fi
+  done
+  return 0
+}
+
+# User input can take arbitrarily long. Check the approved branch/worktree again
+# even with --force; an interactive selection never approves a different tip/path.
+function _zsh_git_sweep_revalidate_local() {
+  local branch=$1 base_ref=$2 force=$3 oid current worktree_path=""
+  oid=$(git rev-parse --verify --quiet "refs/heads/$branch") || return 1
+  current=$(git symbolic-ref --quiet HEAD 2>/dev/null)
+  if [[ "$current" == "refs/heads/$branch" || "$oid" != "${interactive_oids[$branch]}" ]]; then
+    print -r -- "   ⚠️  Local branch changed since selection; skipping: ${(q)branch}"
+    return 1
+  fi
+  if (( ! force )) && ! git merge-base --is-ancestor "$oid" "$base_ref"; then
+    print -r -- "   ⚠️  Branch is no longer merged; skipping: ${(q)branch}"
+    return 1
+  fi
+  _zsh_git_sweep_inspect_worktree "$branch" "$force" "--force" || return 1
+  if [[ "$worktree_path" != "${interactive_paths[$branch]}" ]]; then
+    print -r -- "   ⚠️  Worktree changed since selection; skipping: ${(q)branch}"
+    return 1
+  fi
+  return 0
+}
+
 function _zsh_git_sweep_remote_sweep() {
   emulate -L zsh
 
@@ -319,8 +449,10 @@ function _zsh_git_sweep_remote_sweep() {
   local usage_func=$2
   shift 2
 
-  local -a protect_patterns
+  local -a protect_patterns local_choices remote_choices selected_local selected_remote
+  local -A interactive_oids interactive_paths
   local base_ref=""
+  local interactive=0
   local dry_run=0
   local fetch=1
   local remote=""
@@ -353,6 +485,9 @@ function _zsh_git_sweep_remote_sweep() {
         protect_patterns+=("$2")
         shift
         ;;
+      -i|--interactive)
+        interactive=1
+        ;;
       -n|--dry-run)
         dry_run=1
         ;;
@@ -375,6 +510,11 @@ function _zsh_git_sweep_remote_sweep() {
   if ! git rev-parse --git-dir > /dev/null 2>&1; then
     echo "🚨 Not a Git repository."
     return 1
+  fi
+
+  if (( interactive )) && [[ ! -t 0 || ! -t 1 ]]; then
+    echo "🚨 --interactive requires terminal input and output."
+    return 2
   fi
 
   _zsh_git_sweep_load_protection || return $?
@@ -461,9 +601,25 @@ function _zsh_git_sweep_remote_sweep() {
 
   echo "🗑️  Found ${#candidates} remote branch(es) to delete: ${(j:, :)candidates}"
 
+  if (( interactive )); then
+    remote_choices=("${candidates[@]}")
+    _zsh_git_sweep_choose "$base_ref" 0 "$dry_run" "$remote" || return $?
+    if (( ${#selected_remote} == 0 )); then
+      echo "Cancelled; no selected branches or worktrees were deleted."
+      return 0
+    fi
+    candidates=("${selected_remote[@]}")
+    _zsh_git_sweep_load_protection || return $?
+  fi
+
   local deleted_count=0 failed_count=0
   for branch in "${candidates[@]}"; do
     echo "🔍 Checking remote branch: $remote/$branch (${candidate_reasons[$branch]})"
+    if (( interactive )) && _zsh_git_sweep_matches_protection "$branch"; then
+      echo "   ⚠️  Branch is now protected; skipping."
+      failed_count=$(( failed_count + 1 ))
+      continue
+    fi
 
     if (( dry_run )); then
       echo "   🗑️  Would delete remote branch: $remote/$branch"
@@ -480,11 +636,15 @@ function _zsh_git_sweep_remote_sweep() {
   done
 
   if (( dry_run )); then
+    if (( failed_count > 0 )); then
+      echo "❌ Selected dry run incomplete; some selected branches are now protected."
+      return 1
+    fi
     echo "✅ Dry run complete!"
     return 0
   fi
 
-  if (( deleted_count > 0 )); then
+  if (( deleted_count > 0 && ! interactive )); then
     echo "🌐 Pruning deleted remote-tracking refs from $remote..."
     if ! git fetch -p "$remote"; then
       echo "⚠️  Deleted remote branches, but could not prune local remote-tracking refs."
@@ -501,8 +661,10 @@ function _zsh_git_sweep_remote_sweep() {
 function gitsweep() {
   emulate -L zsh
 
-  local -a protect_patterns
+  local -a protect_patterns local_choices remote_choices selected_local selected_remote
+  local -A interactive_oids interactive_paths
   local base_ref=""
+  local interactive=0
   local dry_run=0
   local force=0
   local fetch=1
@@ -529,6 +691,9 @@ function gitsweep() {
         fi
         protect_patterns+=("$2")
         shift
+        ;;
+      -i|--interactive)
+        interactive=1
         ;;
       -n|--dry-run)
         dry_run=1
@@ -568,6 +733,11 @@ function gitsweep() {
   if ! git rev-parse --git-dir > /dev/null 2>&1; then
     echo "🚨 Not a Git repository."
     return 1
+  fi
+
+  if (( interactive )) && [[ ! -t 0 || ! -t 1 ]]; then
+    echo "🚨 --interactive requires terminal input and output."
+    return 2
   fi
 
   _zsh_git_sweep_load_protection || return $?
@@ -697,9 +867,30 @@ function gitsweep() {
 
   echo "🗑️  Found ${#candidates} branch(es) to inspect: ${(j:, :)candidates}"
 
+  if (( interactive )); then
+    local_choices=("${candidates[@]}")
+    _zsh_git_sweep_choose "$base_ref" "$force" "$dry_run" "" || return $?
+    if (( ${#selected_local} == 0 )); then
+      echo "Cancelled; no selected branches or worktrees were deleted."
+      return 0
+    fi
+    candidates=("${selected_local[@]}")
+    _zsh_git_sweep_load_protection || return $?
+  fi
+
+  local interactive_failed=0
   local b
   for b in "${candidates[@]}"; do
     echo "🔍 Checking branch: $b (${candidate_reasons[$b]})"
+
+    if (( interactive )); then
+      if _zsh_git_sweep_matches_protection "$b" ||
+          ! _zsh_git_sweep_revalidate_local "$b" "$base_ref" "$force"; then
+        echo "   ⚠️  Selected branch is no longer eligible; skipping."
+        interactive_failed=1
+        continue
+      fi
+    fi
 
     if [[ "$b" == "$current_branch" ]]; then
       echo "   ⚠️  Skipping current branch."
@@ -711,7 +902,7 @@ function gitsweep() {
       continue
     fi
 
-    if (( ! force )) && (( ! ${+merged_candidates[$b]} )); then
+    if (( ! force && ! interactive )) && (( ! ${+merged_candidates[$b]} )); then
       echo "   ⚠️  Branch is not merged into $base_ref; skipping."
       if (( ${+stale_candidates[$b]} )); then
         echo "      Review it, then use gitsweep --force --stale-days $stale_days to remove it."
@@ -721,8 +912,23 @@ function gitsweep() {
       continue
     fi
 
-    _zsh_git_sweep_remove_local_branch "$b" "$force" "$dry_run" "gitsweep --force"
+    if ! _zsh_git_sweep_remove_local_branch "$b" "$force" "$dry_run" "gitsweep --force"; then
+      interactive_failed=1
+    fi
   done
+
+  if (( interactive )); then
+    if (( interactive_failed )); then
+      echo "❌ Selected cleanup incomplete; some selected branches were preserved."
+      return 1
+    fi
+    if (( dry_run )); then
+      echo "✅ Selected dry run complete!"
+    else
+      echo "✅ Selected cleanup complete! Unselected branches and worktrees were kept."
+    fi
+    return 0
+  fi
 
   if (( dry_run )); then
     echo "🧼 Would run git worktree prune"
@@ -746,8 +952,10 @@ function gitsweep-remote-all() {
 function gitsweep-all() {
   emulate -L zsh
 
-  local -a protect_patterns
+  local -a protect_patterns local_choices remote_choices selected_local selected_remote
+  local -A interactive_oids interactive_paths
   local base_ref=""
+  local interactive=0
   local dry_run=0
   local force=0
   local fetch=1
@@ -784,6 +992,9 @@ function gitsweep-all() {
         protect_patterns+=("$2")
         shift
         ;;
+      -i|--interactive)
+        interactive=1
+        ;;
       -n|--dry-run)
         dry_run=1
         ;;
@@ -806,6 +1017,11 @@ function gitsweep-all() {
   if ! git rev-parse --git-dir > /dev/null 2>&1; then
     echo "🚨 Not a Git repository."
     return 1
+  fi
+
+  if (( interactive )) && [[ ! -t 0 || ! -t 1 ]]; then
+    echo "🚨 --interactive requires terminal input and output."
+    return 2
   fi
 
   _zsh_git_sweep_load_protection || return $?
@@ -917,9 +1133,32 @@ function gitsweep-all() {
     echo "⚠️  --force: unmerged local commits and dirty worktree changes will be deleted."
   fi
 
+  if (( interactive )); then
+    local_choices=("${local_candidates[@]}")
+    remote_choices=("${remote_candidates[@]}")
+    _zsh_git_sweep_choose "$base_ref" "$force" "$dry_run" "$remote" || return $?
+    if (( ${#selected_local} == 0 && ${#selected_remote} == 0 )); then
+      echo "Cancelled; no selected branches or worktrees were deleted."
+      return 0
+    fi
+    local_candidates=("${selected_local[@]}")
+    remote_candidates=("${selected_remote[@]}")
+    _zsh_git_sweep_load_protection || return $?
+    current_branch=$(git symbolic-ref --quiet HEAD 2>/dev/null)
+    if [[ "$current_branch" != "refs/heads/$base_branch" ]]; then
+      echo "🚨 Primary branch is no longer checked out; cancelling selected cleanup."
+      return 1
+    fi
+  fi
+
   local remote_deleted_count=0
   for branch in "${remote_candidates[@]}"; do
     echo "🔍 Checking remote branch: $remote/$branch (not primary branch)"
+    if (( interactive )) && _zsh_git_sweep_matches_protection "$branch"; then
+      echo "   ⚠️  Branch is now protected; skipping."
+      left_behind+=("$remote/$branch")
+      continue
+    fi
 
     if (( dry_run )); then
       echo "   🗑️  Would delete remote branch: $remote/$branch"
@@ -935,7 +1174,7 @@ function gitsweep-all() {
     fi
   done
 
-  if (( remote_deleted_count > 0 )); then
+  if (( remote_deleted_count > 0 && ! interactive )); then
     echo "🌐 Pruning deleted remote-tracking refs from $remote..."
     if ! git fetch -p "$remote"; then
       echo "⚠️  Deleted remote branches, but could not prune local remote-tracking refs."
@@ -944,6 +1183,14 @@ function gitsweep-all() {
 
   for branch in "${local_candidates[@]}"; do
     echo "🔍 Checking branch: $branch (not primary branch)"
+    if (( interactive )); then
+      if _zsh_git_sweep_matches_protection "$branch" ||
+          ! _zsh_git_sweep_revalidate_local "$branch" "$base_ref" "$force"; then
+        echo "   ⚠️  Selected branch is no longer eligible; skipping."
+        left_behind+=("$branch")
+        continue
+      fi
+    fi
 
     if (( ! force )) && ! git merge-base --is-ancestor "refs/heads/$branch" "$base_ref"; then
       echo "   ⚠️  Branch is not merged into $base_ref; skipping."
@@ -956,6 +1203,19 @@ function gitsweep-all() {
       left_behind+=("$branch")
     fi
   done
+
+  if (( interactive )); then
+    if (( ${#left_behind} > 0 )); then
+      echo "❌ Selected cleanup incomplete. Branches left behind: ${(j:, :)left_behind}"
+      return 1
+    fi
+    if (( dry_run )); then
+      echo "✅ Selected dry run complete!"
+    else
+      echo "✅ Selected cleanup complete! Unselected branches and worktrees were kept."
+    fi
+    return 0
+  fi
 
   if (( dry_run )); then
     echo "🧼 Would run git worktree prune"

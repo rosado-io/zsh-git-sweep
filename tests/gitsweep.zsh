@@ -17,6 +17,9 @@ export GIT_CONFIG_NOSYSTEM=1
 export GIT_TERMINAL_PROMPT=0
 
 function cleanup() {
+  if (( ${+builtins[zpty]} )); then
+    zpty -d 2>/dev/null || true
+  fi
   rm -rf -- "$TEST_ROOT"
 }
 
@@ -667,3 +670,4 @@ test_all_reports_partial_remote_failure
 test_all_alias_is_registered
 
 source "$TEST_DIR/regressions.zsh"
+source "$TEST_DIR/interactive.zsh"

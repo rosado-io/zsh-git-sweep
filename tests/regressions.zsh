@@ -321,10 +321,11 @@ function test_failed_status_is_not_clean() {
     [[ "$output" == *'Could not inspect worktree; skipping branch.'* && "$output" != *'Would delete branch: feature'* ]] \
       || fail "failed status must not be treated as a clean worktree"
     gitsweep --no-fetch >/dev/null 2>&1
+    gitsweep --no-fetch --force >/dev/null 2>&1
   )
   assert_branch_exists "$root/repo" feature
   [[ -d "$root/unreadable" ]] || fail "uninspectable worktree must survive"
-  pass "failed worktree inspection preserves the branch and worktree"
+  pass "failed worktree inspection preserves the branch and worktree even with force"
 }
 
 test_protection_across_commands
