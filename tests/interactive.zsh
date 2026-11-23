@@ -406,3 +406,27 @@ test_interactive_remote_lease
 test_interactive_full_rechecks_primary_and_protection
 test_interactive_remote_reloads_protection
 test_interactive_keeps_unselected_worktree_metadata
+
+function test_interactive_pr_refs() {
+  local root sweep
+  for sweep in gitsweep gitsweep-all; do
+    root=$(make_temp_dir)
+    setup_repo "$root"
+    git -C "$root/repo" update-ref refs/remotes/pr/42 main
+    git -C "$root/repo" update-ref refs/remotes/pr/43 main
+    git -C "$root/repo" branch -D feature >/dev/null
+    delete_remote_feature "$root"
+    start_sweep_terminal "$root/repo" "$sweep" -i
+    expect_sweep_output 'Selection ('
+    [[ "$PTY_LOG" == *'1) '*'refs/remotes/pr/42'* ]] || fail "expected local PR ref in menu"
+    zpty -w sweep 1
+    expect_sweep_output 'Type yes to continue [no]: '
+    zpty -w sweep yes
+    finish_sweep_terminal 0
+    if git -C "$root/repo" show-ref --verify --quiet refs/remotes/pr/42; then fail "selected ref survived"; fi
+    git -C "$root/repo" show-ref --verify --quiet refs/remotes/pr/43 || fail "unselected ref removed"
+    pass "$sweep lets the user select a local PR ref independently"
+  done
+}
+
+test_interactive_pr_refs

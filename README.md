@@ -41,6 +41,14 @@ By default, `gitsweep` is intentionally conservative:
 - It only deletes branches that are already merged into the base branch.
 - Locked worktrees are always preserved, including with `--force`.
 
+Both `gsweep` and `gsweep-a` also clean up local pull request review refs such as
+`refs/remotes/pr/42`. A normal sweep removes tips merged into the selected base.
+Use `--dry-run` to preview them or `-i` to select individual refs. An unmerged tip
+requires `--force`. Protection patterns use the short name, for example
+`--protect 'pr/42'`. The PR cleanup operates only in the clone and skips symbolic
+refs, the selected base, and refs managed by a remote's fetch configuration.
+A remote named `pr` owns that namespace and is excluded from PR-ref cleanup.
+
 Use `gitsweep --force` only after reviewing the branch/worktree. Force mode runs
 `git worktree remove -f` and `git branch -D`, which can delete local worktree
 changes and unmerged commits.

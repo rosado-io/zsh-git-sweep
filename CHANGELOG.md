@@ -8,6 +8,11 @@ for tagged releases.
 
 ## [Unreleased]
 
+### Added
+
+- `gsweep` and `gsweep-a` now include eligible local PR review refs in their
+  default cleanup, dry runs and interactive selection.
+
 ## [0.4.0] - 2026-11-15
 
 ### Added
