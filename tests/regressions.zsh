@@ -343,3 +343,49 @@ test_worktree_special_paths
 test_locked_worktree_is_preserved_in_preview_and_force
 test_hidden_untracked_files_are_preserved
 test_failed_status_is_not_clean
+
+function test_local_pr_refs() (
+  local sweep=$1 root ref output result
+  root=$(make_temp_dir)
+  setup_repo "$root"
+  cd "$root/repo"
+  git update-ref refs/remotes/pr/43 feature
+  git branch -D feature >/dev/null
+  delete_remote_feature "$root"
+  git update-ref refs/remotes/pr/42 main
+  git update-ref refs/remotes/pr/45 main
+  git update-ref refs/remotes/pr/note main
+  git symbolic-ref refs/remotes/pr/44 refs/heads/main
+  git config gitsweep.protect pr/45
+
+  output=$($sweep --dry-run)
+  [[ "$output" == *'refs/remotes/pr/42'* ]] || fail "$sweep preview omitted the eligible PR ref"
+  git show-ref --verify --quiet refs/remotes/pr/42 || fail "preview deleted the PR ref"
+
+  result=0
+  $sweep >/dev/null || result=$?
+  if [[ "$sweep" == gitsweep-all ]]; then
+    (( result == 1 )) || fail "full sweep should report the unmerged PR tip left behind"
+  else
+    (( result == 0 )) || fail "local sweep failed"
+  fi
+  if git show-ref --verify --quiet refs/remotes/pr/42; then fail "$sweep kept a merged PR ref"; fi
+  git show-ref --verify --quiet refs/remotes/pr/43 || fail "$sweep deleted an unmerged PR tip"
+
+  git config --add remote.origin.fetch '+refs/heads/review/*:refs/remotes/pr/7*'
+  git update-ref refs/remotes/pr/70 main
+  $sweep --force --no-fetch >/dev/null
+  if git show-ref --verify --quiet refs/remotes/pr/43; then fail "$sweep did not force-remove unmerged ref"; fi
+  for ref in pr/44 pr/45 pr/note pr/70 origin/main; do
+    git show-ref --verify --quiet "refs/remotes/$ref" || fail "$sweep removed $ref"
+  done
+  git remote add pr "$root/remote.git"
+  git update-ref refs/remotes/pr/46 main
+  $sweep --no-fetch >/dev/null
+  git show-ref --verify --quiet refs/remotes/pr/46 || fail "$sweep removed a real remote's ref"
+  assert_remote_branch_exists "$root" main
+  pass "$sweep cleans eligible local PR refs by default"
+)
+
+test_local_pr_refs gitsweep
+test_local_pr_refs gitsweep-all

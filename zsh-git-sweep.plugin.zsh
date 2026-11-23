@@ -208,6 +208,61 @@ function _zsh_git_sweep_is_protected_branch() {
   return 1
 }
 
+# Populate the caller's pr_oids with direct, unmanaged PR review refs.
+function _zsh_git_sweep_scan_pr_refs() {
+  local base_ref=$1 ref oid kind symref spec dest base_name config result=0
+  local -a destinations
+  pr_oids=()
+  if git remote get-url pr >/dev/null 2>&1; then return 0; fi
+  base_name=$(git rev-parse --verify --symbolic-full-name --end-of-options "$base_ref") || return 1
+  config=$(git config --get-regexp '^remote\..*\.fetch$') || result=$?
+  (( result <= 1 )) || return 1
+  for spec in "${(@f)config}"; do
+    [[ "$spec" == *:* ]] && destinations+=("${spec#*:}")
+  done
+
+  local rows
+  rows=$(git for-each-ref --format='%(refname)%09%(objectname)%09%(objecttype)%09%(symref)' refs/remotes/pr/) || return 1
+  while IFS=$'\t' read -r ref oid kind symref; do
+    [[ "$ref" == refs/remotes/pr/<-> && "$ref" != "$base_name" && "$kind" == commit && -z "$symref" ]] || continue
+    _zsh_git_sweep_matches_protection "${ref#refs/remotes/}" && continue
+    # A fetch destination has either a literal name or a single wildcard.
+    for dest in "${destinations[@]}"; do
+      if [[ "$ref" == "$dest" || ( "$dest" == *\** && "$ref" == "${dest%%\**}"*"${dest#*\*}" ) ]]; then
+        continue 2
+      fi
+    done
+    pr_oids[$ref]=$oid
+  done <<< "$rows"
+  return 0
+}
+
+# Recheck ownership, protection and the scanned tip before affecting a local ref.
+function _zsh_git_sweep_clean_pr_refs() {
+  local base_ref=$1 force=$2 dry_run=$3 full_sweep=$4 ref oid
+  (( ${#pr_choices} )) || return 0
+  local -A scanned_oids=( "${(@kv)pr_oids}" )
+  local -A pr_oids
+  _zsh_git_sweep_scan_pr_refs "$base_ref" || return 1
+  for ref in "${pr_choices[@]}"; do
+    oid=${scanned_oids[$ref]}
+    if [[ "${pr_oids[$ref]:-}" != "$oid" ]]; then
+      echo "⚠️  PR ref changed or is now protected: $ref"
+    elif (( ! force )) && ! git merge-base --is-ancestor "$oid" "$base_ref"; then
+      echo "⚠️  Keeping local PR ref $ref (not merged into $base_ref)."
+      (( full_sweep || interactive )) || continue
+    elif (( dry_run )); then
+      echo "Would delete local PR ref: $ref"
+      continue
+    elif git update-ref --no-deref -d "$ref" "$oid"; then
+      echo "Deleted local PR ref: $ref"
+      continue
+    fi
+    pr_left+=("$ref")
+  done
+  return 0
+}
+
 # Prints branch names and scanned object IDs, skipping symbolic and protected refs.
 function _zsh_git_sweep_remote_branches() {
   local remote=$1
@@ -358,6 +413,15 @@ function _zsh_git_sweep_choose() {
     kinds+=(remote) branches+=("$branch")
   done
 
+  for branch in "${pr_choices[@]}"; do
+    if (( ! force )) && ! git merge-base --is-ancestor "${pr_oids[$branch]}" "$base_ref"; then
+      continue
+    fi
+    label="local PR ref $branch"
+    (( force )) && label+=" [FORCE: may discard unmerged commits]"
+    labels+=("$label") kinds+=(pr) branches+=("$branch")
+  done
+
   count=${#labels}
   if (( count == 0 )); then
     echo "✨ No eligible candidates to select."
@@ -411,11 +475,11 @@ function _zsh_git_sweep_choose() {
     [[ "$answer" == yes ]] || return 0
   fi
   for item in "${indexes[@]}"; do
-    if [[ "${kinds[$item]}" == local ]]; then
-      selected_local+=("${branches[$item]}")
-    else
-      selected_remote+=("${branches[$item]}")
-    fi
+    case "${kinds[$item]}" in
+      local) selected_local+=("${branches[$item]}") ;;
+      remote) selected_remote+=("${branches[$item]}") ;;
+      pr) selected_pr+=("${branches[$item]}") ;;
+    esac
   done
   return 0
 }
@@ -450,6 +514,7 @@ function _zsh_git_sweep_remote_sweep() {
   shift 2
 
   local -a protect_patterns local_choices remote_choices selected_local selected_remote
+  local -a pr_choices selected_pr
   local -A interactive_oids interactive_paths
   local base_ref=""
   local interactive=0
@@ -662,6 +727,7 @@ function gitsweep() {
   emulate -L zsh
 
   local -a protect_patterns local_choices remote_choices selected_local selected_remote
+  local -a pr_choices selected_pr
   local -A interactive_oids interactive_paths
   local base_ref=""
   local interactive=0
@@ -860,7 +926,12 @@ function gitsweep() {
     done < <(git for-each-ref --format='%(refname:lstrip=2)%09%(committerdate:unix)' refs/heads)
   fi
 
-  if (( ${#candidates} == 0 )); then
+  local -A pr_oids
+  local -a pr_left
+  _zsh_git_sweep_scan_pr_refs "$base_ref" || return 1
+  pr_choices=("${(@ok)pr_oids}")
+
+  if (( ${#candidates} == 0 && ${#pr_choices} == 0 )); then
     echo "✨ All clean! No sweep candidates found."
     return 0
   fi
@@ -870,12 +941,19 @@ function gitsweep() {
   if (( interactive )); then
     local_choices=("${candidates[@]}")
     _zsh_git_sweep_choose "$base_ref" "$force" "$dry_run" "" || return $?
-    if (( ${#selected_local} == 0 )); then
+    if (( ${#selected_local} == 0 && ${#selected_pr} == 0 )); then
       echo "Cancelled; no selected branches or worktrees were deleted."
       return 0
     fi
+    pr_choices=("${selected_pr[@]}")
     candidates=("${selected_local[@]}")
     _zsh_git_sweep_load_protection || return $?
+  fi
+
+  _zsh_git_sweep_clean_pr_refs "$base_ref" "$force" "$dry_run" 0 || return 1
+  if (( ${#pr_left} )); then
+    echo "❌ PR refs left behind: ${(j:, :)pr_left}"
+    return 1
   fi
 
   local interactive_failed=0
@@ -953,6 +1031,7 @@ function gitsweep-all() {
   emulate -L zsh
 
   local -a protect_patterns local_choices remote_choices selected_local selected_remote
+  local -a pr_choices selected_pr
   local -A interactive_oids interactive_paths
   local base_ref=""
   local interactive=0
@@ -1113,7 +1192,12 @@ function gitsweep-all() {
     local_candidates+=("$branch")
   done < <(git for-each-ref --format='%(refname:lstrip=2)' refs/heads)
 
-  if (( ${#remote_candidates} == 0 && ${#local_candidates} == 0 )); then
+  local -A pr_oids
+  local -a pr_left
+  _zsh_git_sweep_scan_pr_refs "$base_ref" || return 1
+  pr_choices=("${(@ok)pr_oids}")
+
+  if (( ${#remote_candidates} == 0 && ${#local_candidates} == 0 && ${#pr_choices} == 0 )); then
     echo "✨ All clean! Only $base_branch and protected branches remain locally and on $remote."
     return 0
   fi
@@ -1137,10 +1221,11 @@ function gitsweep-all() {
     local_choices=("${local_candidates[@]}")
     remote_choices=("${remote_candidates[@]}")
     _zsh_git_sweep_choose "$base_ref" "$force" "$dry_run" "$remote" || return $?
-    if (( ${#selected_local} == 0 && ${#selected_remote} == 0 )); then
+    if (( ${#selected_local} == 0 && ${#selected_remote} == 0 && ${#selected_pr} == 0 )); then
       echo "Cancelled; no selected branches or worktrees were deleted."
       return 0
     fi
+    pr_choices=("${selected_pr[@]}")
     local_candidates=("${selected_local[@]}")
     remote_candidates=("${selected_remote[@]}")
     _zsh_git_sweep_load_protection || return $?
@@ -1150,6 +1235,9 @@ function gitsweep-all() {
       return 1
     fi
   fi
+
+  _zsh_git_sweep_clean_pr_refs "$base_ref" "$force" "$dry_run" 1 || return 1
+  left_behind+=("${pr_left[@]}")
 
   local remote_deleted_count=0
   for branch in "${remote_candidates[@]}"; do
